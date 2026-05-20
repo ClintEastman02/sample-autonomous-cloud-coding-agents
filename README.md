@@ -143,3 +143,5 @@ The example provided in this repository is for experimental and educational purp
 ## License
 
 This library is licensed under the MIT-0 License. See the [LICENSE](./LICENSE) file.
+
+Hello from the ABCA agent! (smoke test - 2026-05-20)
