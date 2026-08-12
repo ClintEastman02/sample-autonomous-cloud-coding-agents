@@ -43,7 +43,7 @@
 
 import type { Context } from 'aws-lambda';
 import { logger } from './shared/logger';
-import { lookupRepo } from './shared/repo-config';
+import { type ComputeType, lookupRepo } from './shared/repo-config';
 
 /** Three-underscore delimiter the Gateway uses in ``<target>___<tool>``. */
 const TOOL_NAME_DELIMITER = '___';
@@ -72,7 +72,7 @@ type RepoConfigToolResult =
   | {
     readonly repo: string;
     readonly onboarded: true;
-    readonly compute_type?: string;
+    readonly compute_type?: ComputeType;
     readonly model_id?: string;
     readonly max_turns?: number;
     readonly build_command?: string;

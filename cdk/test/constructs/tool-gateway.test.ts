@@ -41,8 +41,12 @@ function synth(): Template {
 }
 
 describe('ToolGateway', () => {
+  // Synth once for the template-shape assertions (#366 — per-test synth is the
+  // main CDK test-suite cost). The few tests that need a fresh construct
+  // *instance* (mutating the L2, attaching a grantee) call makeStack()
+  // themselves; they are isolated by nature and can't share this template.
   let template: Template;
-  beforeEach(() => {
+  beforeAll(() => {
     template = synth();
   });
 

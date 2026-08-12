@@ -36,14 +36,28 @@ from __future__ import annotations
 
 import json
 import os
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
-from shell import log
+from shell import log, log_error_cw
 
 if TYPE_CHECKING:
     from collections.abc import Generator
 
     import httpx
+
+
+class SdkToolResult(TypedDict):
+    """The MCP tool-result shape the SDK expects back from a tool closure.
+
+    ``content`` is a list of content blocks (P1 emits a single ``text`` block);
+    ``isError`` flags a tool-level failure the model should see. Declaring it as
+    a ``TypedDict`` lets the type checker catch drift across the several return
+    sites in :func:`_repo_config_impl` instead of letting a stray
+    ``{"content": "..."}`` (string instead of list) slip through.
+    """
+
+    content: list[dict[str, Any]]
+    isError: bool
 
 #: Env var carrying the Gateway MCP endpoint URL. Set on the compute
 #: environment (AgentCore runtime env / ECS container) by the CDK
@@ -96,8 +110,14 @@ def _sigv4_auth(region: str) -> httpx.Auth:
         requires_request_body = True
 
         def auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response]:
-            # Re-freeze on every request so a refreshed (rotated) credential is
-            # picked up; signing is cheap relative to the network round-trip.
+            # Re-freeze on every request so a rotation within THIS credentials
+            # chain is picked up — botocore's RefreshableCredentials (what the
+            # task/execution role resolves to on ECS/AgentCore) refreshes the
+            # frozen snapshot transparently. A non-refreshable credential object
+            # captured at build time would keep signing with its original
+            # material; that is not a case that arises for the ambient role
+            # credentials this bridge signs with. Signing is cheap relative to
+            # the network round-trip.
             frozen = credentials.get_frozen_credentials()
             aws_request = AWSRequest(
                 method=request.method,
@@ -184,13 +204,49 @@ _REPO_CONFIG_DESCRIPTION = (
 )
 
 
-async def _repo_config_impl(gateway_url: str, region: str, args: dict[str, Any]) -> dict[str, Any]:
+#: Exception types that represent an EXPECTED federation hiccup — network,
+#: transport, timeout, or a Gateway/MCP-level error. These are logged at WARN
+#: and surfaced as a tool error; anything outside this set is treated as an
+#: unexpected (likely coding/deployment) bug and logged loudly (see below).
+def _expected_gateway_errors() -> tuple[type[BaseException], ...]:
+    """Resolve the expected-error tuple lazily (``mcp``/``httpx`` are optional).
+
+    Imported inside the function so a missing transport dependency can't break
+    module import; if either is unavailable we still catch ``OSError`` /
+    ``TimeoutError`` and fall through to the loud path for the rest.
+    """
+    expected: list[type[BaseException]] = [OSError, TimeoutError]
+    try:
+        import httpx
+
+        expected.append(httpx.HTTPError)
+    except ImportError:
+        pass
+    try:
+        from mcp.shared.exceptions import McpError
+
+        expected.append(McpError)
+    except ImportError:
+        pass
+    return tuple(expected)
+
+
+async def _repo_config_impl(gateway_url: str, region: str, args: dict[str, Any]) -> SdkToolResult:
     """The ``repo_config`` tool body — validates, calls the Gateway, shapes the result.
 
     Extracted from the registered closure so it can be unit-tested directly
     (the SDK server wraps the closure in machinery that is awkward to invoke).
     Always returns an SDK tool-result dict; a federation failure is surfaced as
     ``isError`` rather than raised, so a Gateway hiccup never aborts the task.
+
+    A failure is classified: an EXPECTED transport/gateway error is logged at
+    WARN (a routine hiccup), while any other exception — an ``AttributeError``
+    from an unexpected response shape, a ``RuntimeError`` from
+    ``_match_remote_tool`` (the Gateway not exposing the tool the agent expects
+    is a deployment-contract violation), etc. — is logged via ``log_error_cw``
+    so it reaches operators' APPLICATION_LOGS instead of hiding in a WARN line.
+    Both still return a tool error rather than raising, preserving the
+    never-abort-the-task contract.
     """
     repo = str(args.get("repo", "")).strip()
     if not repo:
@@ -200,10 +256,22 @@ async def _repo_config_impl(gateway_url: str, region: str, args: dict[str, Any])
         }
     try:
         result = await _call_gateway(gateway_url, region, REMOTE_REPO_CONFIG_TOOL, {"repo": repo})
-    except Exception as exc:
-        # Surface as a tool error (not a crash): the agent can proceed without
-        # the config, and a failed federation call must not abort the task.
+    except _expected_gateway_errors() as exc:
+        # Routine federation hiccup (network / transport / gateway). The agent
+        # can proceed without the config; a failed call must not abort the task.
         log("WARN", f"gateway repo_config failed for {repo!r}: {type(exc).__name__}: {exc}")
+        detail = f"{type(exc).__name__}: {exc}"
+        return {
+            "content": [{"type": "text", "text": f"Error calling repo_config: {detail}"}],
+            "isError": True,
+        }
+    except Exception as exc:
+        # Unexpected: a coding or deployment-contract bug (bad response shape,
+        # missing/ambiguous federated tool, …). Still don't abort the task, but
+        # surface it loudly so it is not buried in a WARN triage line.
+        log_error_cw(
+            f"gateway repo_config UNEXPECTED failure for {repo!r}: {type(exc).__name__}: {exc}"
+        )
         detail = f"{type(exc).__name__}: {exc}"
         return {
             "content": [{"type": "text", "text": f"Error calling repo_config: {detail}"}],
@@ -229,11 +297,18 @@ def build_gateway_server() -> Any:
 
     try:
         from claude_agent_sdk import create_sdk_mcp_server, tool
-    except ImportError:  # pragma: no cover - SDK always present in the container
+    except ImportError as exc:  # pragma: no cover - SDK always present in the container
         # Feature-detect: no SDK means the bridge can't be built, so return None
         # (like the URL-unset path above) to disable the tool rather than abort
         # startup — callers treat None as "gateway tool not offered", not failure.
-        return None  # nosemgrep: py-silent-success-masking -- feature-detect: no SDK, tool disabled not failed  # noqa: E501
+        # Log a WARN (matching the region-unset path below) so this isn't silent:
+        # the operator opted in via the URL, so "can't honor it" deserves a signal.
+        log(
+            "WARN",
+            f"{GATEWAY_URL_ENV} is set but claude_agent_sdk is unavailable "
+            f"({exc}); AgentCore Gateway tool bridge disabled",
+        )
+        return None  # nosemgrep: py-silent-success-masking -- feature-detect logged above; tool disabled not failed  # noqa: E501
 
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or ""
     if not region:

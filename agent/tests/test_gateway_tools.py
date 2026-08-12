@@ -39,6 +39,26 @@ class TestBuildGatewayServer:
         assert server["type"] == "sdk"
         assert server["name"] == gw.GATEWAY_SERVER_NAME
 
+    def test_falls_back_to_aws_default_region(self, monkeypatch):
+        # AWS_DEFAULT_REGION-only is a common Lambda/ECS combination; the bridge
+        # must build, not silently disable, when only that var is set.
+        monkeypatch.setenv(gw.GATEWAY_URL_ENV, "https://gw.example/mcp")
+        monkeypatch.delenv("AWS_REGION", raising=False)
+        monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-west-1")
+        server = gw.build_gateway_server()
+        assert server is not None
+        assert server["name"] == gw.GATEWAY_SERVER_NAME
+
+    def test_returns_none_and_warns_when_url_set_but_no_region(self, monkeypatch, capfd):
+        # N3 region guard: URL set (feature opted in) but no region resolvable is
+        # a deployment misconfig. Disable the bridge with a WARN rather than
+        # letting it surface later as an opaque SigV4 signing error.
+        monkeypatch.setenv(gw.GATEWAY_URL_ENV, "https://gw.example/mcp")
+        monkeypatch.delenv("AWS_REGION", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+        assert gw.build_gateway_server() is None
+        assert "no AWS region is resolvable" in capfd.readouterr().out
+
     def test_server_name_is_neutral_no_linear(self):
         # The scrubber strip_linear_mcp_servers deletes any entry containing
         # "linear"; the federated bridge must never collide with that marker.
@@ -96,6 +116,37 @@ class TestRepoConfigImpl:
         result = _run(gw._repo_config_impl("https://gw/mcp", "us-east-1", {"repo": "org/repo"}))
         assert result["isError"] is True
         assert "gateway unreachable" in result["content"][0]["text"]
+
+    def test_expected_transport_error_logs_warn_not_error(self, monkeypatch, capfd):
+        # A TimeoutError is an EXPECTED federation hiccup → WARN, tool error,
+        # and (crucially) NOT routed through the loud log_error_cw path.
+        loud = []
+        monkeypatch.setattr(gw, "log_error_cw", lambda msg: loud.append(msg))
+
+        async def _timeout(*a, **k):
+            raise TimeoutError("slow gateway")
+
+        monkeypatch.setattr(gw, "_call_gateway", _timeout)
+        result = _run(gw._repo_config_impl("https://gw/mcp", "us-east-1", {"repo": "org/repo"}))
+        assert result["isError"] is True
+        assert loud == []  # expected error must not page operators
+        assert "WARN" in capfd.readouterr().out
+
+    def test_unexpected_error_is_logged_loudly(self, monkeypatch):
+        # An AttributeError (unexpected response shape / coding bug) must reach
+        # log_error_cw so it surfaces in APPLICATION_LOGS, still without raising.
+        loud = []
+        monkeypatch.setattr(gw, "log_error_cw", lambda msg: loud.append(msg))
+
+        async def _bug(*a, **k):
+            raise AttributeError("unexpected shape")
+
+        monkeypatch.setattr(gw, "_call_gateway", _bug)
+        result = _run(gw._repo_config_impl("https://gw/mcp", "us-east-1", {"repo": "org/repo"}))
+        assert result["isError"] is True
+        assert len(loud) == 1
+        assert "UNEXPECTED" in loud[0]
+        assert "unexpected shape" in result["content"][0]["text"]
 
     def test_propagates_remote_is_error_flag(self, monkeypatch):
         async def _err_result(*a, **k):

@@ -1278,6 +1278,12 @@ describe('AgentStack tool-gateway gate (ADR-019 P1)', () => {
     });
 
     test('the ECS task role is granted bedrock-agentcore:InvokeGateway', () => {
+      // Scope the assertion to the ECS TASK role. The AgentCore runtime role is
+      // granted the same InvokeGateway action in this very template, so an
+      // unscoped `hasResourceProperties` would stay green even if the ECS
+      // grant (ecs-agent-cluster.ts:554) were deleted — precisely the
+      // cross-substrate regression this test exists to catch. Pin the policy to
+      // the EcsAgentCluster TaskRole via its `Roles` attachment.
       template.hasResourceProperties('AWS::IAM::Policy', {
         PolicyDocument: Match.objectLike({
           Statement: Match.arrayWith([
@@ -1287,6 +1293,11 @@ describe('AgentStack tool-gateway gate (ADR-019 P1)', () => {
             }),
           ]),
         }),
+        Roles: Match.arrayWith([
+          Match.objectLike({
+            Ref: Match.stringLikeRegexp('EcsAgentClusterTaskRole'),
+          }),
+        ]),
       });
     });
   });
