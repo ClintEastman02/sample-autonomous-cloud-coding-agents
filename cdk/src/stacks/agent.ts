@@ -463,7 +463,7 @@ export class AgentStack extends Stack {
       // when ``--context enableToolGateway=true``; the agent's in-process SigV4
       // MCP bridge (gateway_tools.build_gateway_server) reads it to register the
       // ``abca_gateway`` SDK server. Absent → no gateway tool, unchanged.
-      ...(toolGateway ? { ABCA_TOOL_GATEWAY_URL: toolGateway.gateway.gatewayUrl! } : {}),
+      ...(toolGateway ? { ABCA_TOOL_GATEWAY_URL: toolGateway.gatewayUrl } : {}),
     };
 
     const runtimeNetworkConfig = agentcore.RuntimeNetworkConfiguration.usingVpc(this, {

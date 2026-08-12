@@ -133,6 +133,24 @@ describe('ToolGateway', () => {
     expect(actions).not.toContain('dynamodb:DeleteItem');
   });
 
+  test('gatewayUrl returns the L2 endpoint URL when present', () => {
+    const { gateway } = makeStack();
+    // The L2 resolves gatewayUrl to a CloudFormation token at synth; the getter
+    // must surface it (not undefined) so the env wiring gets a real value.
+    expect(gateway.gatewayUrl).toBeDefined();
+  });
+
+  test('gatewayUrl throws (fails synth loudly) if the L2 exposes no URL', () => {
+    const { gateway } = makeStack();
+    // Simulate the L2 exposing no URL — rather than a `!` assertion that would
+    // ship the literal "undefined" into the env, the getter must throw.
+    Object.defineProperty(gateway.gateway, 'gatewayUrl', {
+      value: undefined,
+      configurable: true,
+    });
+    expect(() => gateway.gatewayUrl).toThrow(/gatewayUrl is undefined/);
+  });
+
   test('grantInvoke attaches bedrock-agentcore:InvokeGateway to the grantee', () => {
     const { stack, gateway } = makeStack();
     const runtime = new Role(stack, 'RuntimeRole', {

@@ -436,6 +436,21 @@ def _resolve_setting_sources(config: TaskConfig) -> list[Literal["user", "projec
     return ["project"] if config.repo_url else []
 
 
+def _register_gateway_server(mcp_servers: dict[str, Any]) -> None:
+    """Register the AgentCore Gateway bridge into ``mcp_servers`` if enabled.
+
+    Mutates ``mcp_servers`` in place, adding the bridge under
+    :data:`GATEWAY_SERVER_NAME` when :func:`build_gateway_server` returns a
+    server (feature deployed + SDK present). A no-op otherwise. Extracted from
+    ``run_agent`` so the registration wiring is unit-testable without driving
+    the whole SDK session (the #641 P1 review flagged this path as untested).
+    """
+    gateway_server = build_gateway_server()
+    if gateway_server is not None:
+        mcp_servers[GATEWAY_SERVER_NAME] = gateway_server
+        log("AGENT", "AgentCore Gateway tool bridge registered (mcp__abca_gateway__*)")
+
+
 async def run_agent(
     prompt: str,
     system_prompt: str,
@@ -538,12 +553,9 @@ async def run_agent(
     # AgentCore Gateway federation (ADR-019 P1): register the in-process
     # SigV4-signed bridge to the Gateway's read-only tools when the feature is
     # deployed (ABCA_TOOL_GATEWAY_URL set via --context enableToolGateway=true).
-    # Offered regardless of read_only — the tool is itself read-only. Returns
-    # None (and is skipped) when the URL is unset or the SDK is unavailable.
-    gateway_server = build_gateway_server()
-    if gateway_server is not None:
-        mcp_servers[GATEWAY_SERVER_NAME] = gateway_server
-        log("AGENT", "AgentCore Gateway tool bridge registered (mcp__abca_gateway__*)")
+    # Offered regardless of read_only — the tool is itself read-only. No-op when
+    # the URL is unset or the SDK is unavailable.
+    _register_gateway_server(mcp_servers)
 
     options = ClaudeAgentOptions(
         model=config.anthropic_model,

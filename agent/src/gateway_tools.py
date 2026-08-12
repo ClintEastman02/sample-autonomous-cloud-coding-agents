@@ -56,7 +56,11 @@ GATEWAY_SERVICE = "bedrock-agentcore"
 
 #: In-process SDK MCP server name. The SDK surfaces each tool as
 #: ``mcp__<server>__<tool>``; the model therefore sees
-#: ``mcp__abca_gateway__repo_config``. Deliberately neutral (no "linear").
+#: ``mcp__abca_gateway__repo_config``. Named neutrally as a general convention
+#: (no channel-specific term like "linear"). NOTE: this is a naming convention,
+#: NOT something ``strip_linear_mcp_servers`` enforces — that scrubber only
+#: rewrites the on-disk ``.mcp.json`` in the cloned repo and never sees this
+#: in-process SDK server.
 GATEWAY_SERVER_NAME = "abca_gateway"
 
 #: Suffix of the federated tool name the Gateway exposes
@@ -226,10 +230,24 @@ def build_gateway_server() -> Any:
     try:
         from claude_agent_sdk import create_sdk_mcp_server, tool
     except ImportError:  # pragma: no cover - SDK always present in the container
-        # nosemgrep: py-silent-success-masking -- feature-detect: no SDK means the bridge can't be built, so None (as in the URL-unset path above) disables the tool instead of aborting startup.  # noqa: E501
-        return None
+        # Feature-detect: no SDK means the bridge can't be built, so return None
+        # (like the URL-unset path above) to disable the tool rather than abort
+        # startup — callers treat None as "gateway tool not offered", not failure.
+        return None  # nosemgrep: py-silent-success-masking -- feature-detect: no SDK, tool disabled not failed  # noqa: E501
 
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or ""
+    if not region:
+        # A blank region would only surface far downstream as an opaque SigV4
+        # signing error on the first tool call. The Gateway URL being set while
+        # region is unresolved is a deployment misconfiguration, so disable the
+        # bridge here with a clear reason instead — same "don't abort startup,
+        # just don't offer the tool" posture as the URL-unset path above.
+        log(
+            "WARN",
+            f"{GATEWAY_URL_ENV} is set but no AWS region is resolvable "
+            "(AWS_REGION / AWS_DEFAULT_REGION); AgentCore Gateway tool bridge disabled",
+        )
+        return None
 
     # Thin SDK closure over _repo_config_impl (tested directly, so the wrapper
     # itself is not exercised by unit tests).

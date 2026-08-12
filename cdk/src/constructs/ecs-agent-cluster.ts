@@ -394,7 +394,7 @@ export class EcsAgentCluster extends Construct {
       ...(sdkUaAppId ? { AWS_SDK_UA_APP_ID: sdkUaAppId } : {}),
       // ADR-019 P1: federated-tool Gateway URL, parity with the AgentCore
       // runtime env. Present only when the gateway is provisioned.
-      ...(props.toolGateway && { ABCA_TOOL_GATEWAY_URL: props.toolGateway.gateway.gatewayUrl! }),
+      ...(props.toolGateway && { ABCA_TOOL_GATEWAY_URL: props.toolGateway.gatewayUrl }),
     };
     const image = ecs.ContainerImage.fromDockerImageAsset(props.agentImageAsset);
     const makeTaskDef = (

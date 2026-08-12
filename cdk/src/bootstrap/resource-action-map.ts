@@ -56,6 +56,14 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   'AWS::ApiGateway::RestApi': ['apigateway:POST'],
   'AWS::Bedrock::Guardrail': ['bedrock:CreateGuardrail'],
   'AWS::Bedrock::GuardrailVersion': ['bedrock:CreateGuardrailVersion'],
+  // ADR-019 tool-gateway feature. Only synthesized under
+  // `--context enableToolGateway=true`, so the default-context synth-coverage
+  // test never sees these — they are mapped anyway so the map stays a complete
+  // statement of what the bootstrap bundle must cover (same pattern as the
+  // lambda-microvm entries below). All create actions fall under the
+  // `bedrock-agentcore:*` grant in `policies/compute-agentcore.ts`.
+  'AWS::BedrockAgentCore::Gateway': ['bedrock-agentcore:CreateGateway'],
+  'AWS::BedrockAgentCore::GatewayTarget': ['bedrock-agentcore:CreateGatewayTarget'],
   'AWS::BedrockAgentCore::Memory': ['bedrock-agentcore:CreateMemory'],
   'AWS::BedrockAgentCore::Runtime': ['bedrock-agentcore:CreateRuntime'],
   'AWS::CloudFront::Distribution': ['cloudfront:CreateDistribution'],

@@ -1241,4 +1241,53 @@ describe('AgentStack tool-gateway gate (ADR-019 P1)', () => {
       });
     });
   });
+
+  describe('substrate parity: with BOTH --context enableToolGateway=true AND compute_type=ecs', () => {
+    // #641 requires the federated tool to work on BOTH substrates. The
+    // AgentCore-runtime wiring is asserted above; without these two the ECS
+    // task could ship with no gateway URL and no InvokeGateway grant — the tool
+    // silently absent on Fargate while looking present in the AgentCore path.
+    // This is the both-substrates acceptance bar the ADR-019 review called out.
+    let template: Template;
+
+    beforeAll(() => {
+      const app = new App({
+        context: { enableToolGateway: true, compute_type: 'ecs' },
+      });
+      const stack = new AgentStack(app, 'GatewayEcsStack', {
+        env: { account: '123456789012', region: 'us-east-1' },
+      });
+      template = Template.fromStack(stack);
+    });
+
+    test('every ECS task definition container carries ABCA_TOOL_GATEWAY_URL', () => {
+      // Both the build and planning task defs share the base container env, so
+      // each must carry the gateway URL — assert on all of them, not just one.
+      const taskDefs = Object.values(
+        template.findResources('AWS::ECS::TaskDefinition'),
+      );
+      expect(taskDefs.length).toBeGreaterThan(0);
+      for (const taskDef of taskDefs) {
+        const containers = taskDef.Properties?.ContainerDefinitions ?? [];
+        const withGatewayUrl = containers.filter(
+          (c: { Environment?: { Name: string }[] }) =>
+            (c.Environment ?? []).some((e) => e.Name === 'ABCA_TOOL_GATEWAY_URL'),
+        );
+        expect(withGatewayUrl.length).toBeGreaterThan(0);
+      }
+    });
+
+    test('the ECS task role is granted bedrock-agentcore:InvokeGateway', () => {
+      template.hasResourceProperties('AWS::IAM::Policy', {
+        PolicyDocument: Match.objectLike({
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Action: 'bedrock-agentcore:InvokeGateway',
+              Effect: 'Allow',
+            }),
+          ]),
+        }),
+      });
+    });
+  });
 });

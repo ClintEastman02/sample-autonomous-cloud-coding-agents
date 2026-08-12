@@ -61,16 +61,23 @@ interface RepoConfigToolInput {
  * ``RepoConfig``. Secret ARNs and other operational internals are deliberately
  * omitted: the agent only needs the fields that let it mirror CI's build/lint
  * gating and understand which substrate it runs on.
+ *
+ * Modeled as a discriminated union keyed on ``onboarded``: a non-onboarded repo
+ * carries none of the config fields, and an onboarded one carries all of them.
+ * This makes the "config present iff onboarded" invariant a compile-time
+ * guarantee rather than a runtime convention of a bag of optionals.
  */
-interface RepoConfigToolResult {
-  readonly repo: string;
-  readonly onboarded: boolean;
-  readonly compute_type?: string;
-  readonly model_id?: string;
-  readonly max_turns?: number;
-  readonly build_command?: string;
-  readonly lint_command?: string;
-}
+type RepoConfigToolResult =
+  | { readonly repo: string; readonly onboarded: false }
+  | {
+    readonly repo: string;
+    readonly onboarded: true;
+    readonly compute_type?: string;
+    readonly model_id?: string;
+    readonly max_turns?: number;
+    readonly build_command?: string;
+    readonly lint_command?: string;
+  };
 
 /**
  * Extract the tool name from the Gateway client context, stripping the
