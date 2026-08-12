@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any
 
 from shell import log, log_error_cw
 
@@ -44,20 +44,6 @@ if TYPE_CHECKING:
     from collections.abc import Generator
 
     import httpx
-
-
-class SdkToolResult(TypedDict):
-    """The MCP tool-result shape the SDK expects back from a tool closure.
-
-    ``content`` is a list of content blocks (P1 emits a single ``text`` block);
-    ``isError`` flags a tool-level failure the model should see. Declaring it as
-    a ``TypedDict`` lets the type checker catch drift across the several return
-    sites in :func:`_repo_config_impl` instead of letting a stray
-    ``{"content": "..."}`` (string instead of list) slip through.
-    """
-
-    content: list[dict[str, Any]]
-    isError: bool
 
 #: Env var carrying the Gateway MCP endpoint URL. Set on the compute
 #: environment (AgentCore runtime env / ECS container) by the CDK
@@ -231,7 +217,7 @@ def _expected_gateway_errors() -> tuple[type[BaseException], ...]:
     return tuple(expected)
 
 
-async def _repo_config_impl(gateway_url: str, region: str, args: dict[str, Any]) -> SdkToolResult:
+async def _repo_config_impl(gateway_url: str, region: str, args: dict[str, Any]) -> dict[str, Any]:
     """The ``repo_config`` tool body — validates, calls the Gateway, shapes the result.
 
     Extracted from the registered closure so it can be unit-tested directly
