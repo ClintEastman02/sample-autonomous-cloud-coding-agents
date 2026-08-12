@@ -1199,3 +1199,46 @@ describe('AgentStack solution attribution (#319): AWS_SDK_UA_APP_ID via stack-le
     }
   });
 });
+
+describe('AgentStack tool-gateway gate (ADR-019 P1)', () => {
+  test('default (no-gate) synth provisions NO Gateway — synth stays byte-unchanged', () => {
+    // The whole ToolGateway construct is context-gated; without the flag the
+    // template must contain zero Gateway/GatewayTarget resources so the default
+    // deploy is untouched and no new CFN type enters the bootstrap coverage set.
+    const app = new App();
+    const stack = new AgentStack(app, 'NoGatewayStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    const template = Template.fromStack(stack);
+    template.resourceCountIs('AWS::BedrockAgentCore::Gateway', 0);
+    template.resourceCountIs('AWS::BedrockAgentCore::GatewayTarget', 0);
+  });
+
+  describe('with --context enableToolGateway=true', () => {
+    let template: Template;
+
+    beforeAll(() => {
+      const app = new App({ context: { enableToolGateway: true } });
+      const stack = new AgentStack(app, 'GatewayStack', {
+        env: { account: '123456789012', region: 'us-east-1' },
+      });
+      template = Template.fromStack(stack);
+    });
+
+    test('provisions exactly one AWS_IAM Gateway + one Lambda target', () => {
+      template.resourceCountIs('AWS::BedrockAgentCore::Gateway', 1);
+      template.hasResourceProperties('AWS::BedrockAgentCore::Gateway', {
+        AuthorizerType: 'AWS_IAM',
+      });
+      template.resourceCountIs('AWS::BedrockAgentCore::GatewayTarget', 1);
+    });
+
+    test('the AgentCore runtime carries ABCA_TOOL_GATEWAY_URL', () => {
+      template.hasResourceProperties('AWS::BedrockAgentCore::Runtime', {
+        EnvironmentVariables: Match.objectLike({
+          ABCA_TOOL_GATEWAY_URL: Match.anyValue(),
+        }),
+      });
+    });
+  });
+});

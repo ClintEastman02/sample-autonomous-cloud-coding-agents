@@ -69,6 +69,7 @@ import { TaskEventsTable } from '../constructs/task-events-table';
 import { TaskNudgesTable } from '../constructs/task-nudges-table';
 import { TaskOrchestrator } from '../constructs/task-orchestrator';
 import { TaskTable } from '../constructs/task-table';
+import { ToolGateway } from '../constructs/tool-gateway';
 import { TraceArtifactsBucket } from '../constructs/trace-artifacts-bucket';
 import { UserConcurrencyTable } from '../constructs/user-concurrency-table';
 import { WebhookTable } from '../constructs/webhook-table';
@@ -226,6 +227,17 @@ export class AgentStack extends Stack {
     const computeType = this.node.tryGetContext('compute_type') ?? 'agentcore';
     const lambdaMicrovmEnabled = computeType === 'lambda-microvm';
 
+    // --- Tool-federation Gateway deploy gate (ADR-019 P1) ---
+    // Whether to provision the AgentCore Gateway that federates the agent's MCP
+    // tools (P1: one read-only Lambda target, ``abca_repo_config``). OFF by
+    // default and additive — the resources synthesize only under
+    // ``--context enableToolGateway=true``, so the default synth (and the
+    // synth-coverage test that synths with default context) stays byte-for-byte
+    // unchanged and introduces no new CFN types into the bootstrap policy set.
+    // Same context-gate shape as the ECS / MicroVM compute backends above.
+    const toolGatewayEnabled = this.node.tryGetContext('enableToolGateway') === true
+      || this.node.tryGetContext('enableToolGateway') === 'true';
+
     // The operator-supplied MicroVM image inputs, resolved HERE (pure context
     // reads, no construct dependency) rather than at the construct's call site
     // below, because TaskApi — created well before the MicroVM construct — needs
@@ -368,6 +380,16 @@ export class AgentStack extends Stack {
       ...(microvmImageConfigured && { lambdaMicrovmImageArn: lazyMicrovmImageArn }),
     });
 
+    // --- Tool-federation Gateway (ADR-019 P1, CONTEXT-GATED) ---
+    // Provisioned only under ``--context enableToolGateway=true`` (gate read
+    // above). When on, exposes one read-only Lambda tool (``abca_repo_config``)
+    // through an AgentCore Gateway with SigV4 inbound + gateway-role outbound.
+    // The agent reaches it via an in-process SigV4-signing MCP bridge that reads
+    // ``ABCA_TOOL_GATEWAY_URL`` (wired below on every substrate role).
+    const toolGateway = toolGatewayEnabled
+      ? new ToolGateway(this, 'ToolGateway', { repoTable: repoTable.table })
+      : undefined;
+
     // --- AgentCore Runtime (IAM-authed orchestrator path) ---
     //
     // One runtime, invoked by OrchestratorFn via SigV4. See
@@ -437,6 +459,11 @@ export class AgentStack extends Stack {
       // AWS_SDK_UA_APP_ID natively → `app/uksb-wt64nei4u6#{stack}`. The
       // Lambda-only Aspect can't reach this runtime, so set it explicitly.
       ...(sdkUaAppId ? { AWS_SDK_UA_APP_ID: sdkUaAppId } : {}),
+      // ADR-019 P1: the federated-tool Gateway URL (context-gated). Present only
+      // when ``--context enableToolGateway=true``; the agent's in-process SigV4
+      // MCP bridge (gateway_tools.build_gateway_server) reads it to register the
+      // ``abca_gateway`` SDK server. Absent → no gateway tool, unchanged.
+      ...(toolGateway ? { ABCA_TOOL_GATEWAY_URL: toolGateway.gateway.gatewayUrl! } : {}),
     };
 
     const runtimeNetworkConfig = agentcore.RuntimeNetworkConfiguration.usingVpc(this, {
@@ -530,6 +557,12 @@ export class AgentStack extends Stack {
     githubTokenSecret.grantRead(runtime);
     applicationLogGroup.grantWrite(runtime);
     agentMemory.grantReadWrite(runtime);
+
+    // ADR-019 P1 (context-gated): let the runtime SigV4-invoke the tool Gateway
+    // (``bedrock-agentcore:InvokeGateway``). No-op unless the gateway is
+    // provisioned. The ECS task role gets the parallel grant via the
+    // EcsAgentCluster prop below (substrate parity).
+    toolGateway?.grantInvoke(runtime);
 
     // Grant the runtime invoke on each configured foundation model + its US
     // cross-Region inference profile. The model set is a single source of truth
@@ -757,6 +790,9 @@ export class AgentStack extends Stack {
         // construct admits the task role to the trust and injects
         // AGENT_SESSION_ROLE_ARN into the container.
         agentSessionRole,
+        // ADR-019 P1: parity — grants the task role InvokeGateway + injects
+        // ABCA_TOOL_GATEWAY_URL. Undefined unless --context enableToolGateway=true.
+        toolGateway,
       })
       : undefined;
 
