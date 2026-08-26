@@ -95,6 +95,11 @@ jobs:
           GITLEAKS_RANGE: ${{ steps.range.outputs.range }}
         run: mise run security:secrets:range
 
+      # This step is part of the "Secrets, deps, and workflow scan" job, which is
+      # a required status check on main (repo ruleset) and re-runs in the merge
+      # queue using trunk's copy of this workflow — so a fork PR cannot gut this
+      # step to slip a masking regression past merge. Do not remove this step or
+      # rename the job: the required-check binding is by job name.
       - name: Silent-success masking scan (semgrep, ratcheted to new findings)
         env:
           SEMGREP_MASKING_BASELINE: ${{ steps.range.outputs.baseline }}
