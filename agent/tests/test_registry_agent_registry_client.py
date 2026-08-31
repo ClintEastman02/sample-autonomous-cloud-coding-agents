@@ -14,7 +14,7 @@ import json
 import pytest
 
 from registry.agent_registry_client import AgentRegistryClient
-from registry.client import RegistryResolutionError
+from registry.client import RegistryRecordMalformedError, RegistryResolutionError
 from registry.ref import parse_ref
 
 _RUNTIME_META_KEY = "dev.abca.runtime"
@@ -106,6 +106,20 @@ class TestExtractRuntime:
         }
         assert _client()._extract_runtime(raw) == {}
 
+    def test_agent_skills_malformed_frontmatter_raises_not_empty(self):
+        # A frontmatter block that is present but not valid YAML (unterminated flow
+        # sequence) must be rejected, not collapsed to `{}` — collapsing erases the
+        # publisher/runtime and hides the corruption (#791).
+        skill_md = "---\nname: x\nx-abca-runtime: [1, 2\n---\nbody"
+        raw = {
+            "recordType": "SKILL",
+            "descriptors": {
+                "agentSkillsDefinition": {"additionalData": {"skillMd": {"data": skill_md}}}
+            },
+        }
+        with pytest.raises(RegistryRecordMalformedError):
+            _client()._extract_runtime(raw)
+
     def test_agent_skills_newline_description_cannot_inject_runtime_key(self):
         # B1 (#246): a description carrying a newline + a second x-abca-runtime
         # line must not shadow the validated runtime. Frontmatter emitted by the
@@ -171,3 +185,24 @@ class TestResolveFailClosed:
                 "registry://mcp_server/acme/pdf-tools@1.4.1",
             )
         assert exc.value.reason == "REMOVED"
+
+    def test_fails_malformed_when_winner_frontmatter_is_unparseable(self):
+        # A malformed frontmatter block must reject the ref as MALFORMED — distinct
+        # from REMOVED (empty) — rather than resolving with erased attribution (#791).
+        skill_md = "---\nname: acme-readme-helper\nx-abca-runtime: [1, 2\n---\nbody"
+        record = {
+            "recordId": "rec-1.0.0",
+            "recordArn": (
+                "arn:aws:agent-registry:us-east-1:123456789012:registry/r/record/rec-1.0.0"
+            ),
+            "name": "skill/acme/readme-helper",
+            "recordType": "SKILL",
+            "descriptors": {
+                "agentSkillsDefinition": {"additionalData": {"skillMd": {"data": skill_md}}}
+            },
+            "recordVersion": "1.0.0",
+            "status": "APPROVED",
+        }
+        with pytest.raises(RegistryResolutionError) as exc:
+            self._resolve([record], "registry://skill/acme/readme-helper@1.0.0")
+        assert exc.value.reason == "MALFORMED"

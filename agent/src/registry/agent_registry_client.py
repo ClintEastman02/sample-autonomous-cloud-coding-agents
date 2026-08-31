@@ -15,7 +15,11 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from registry.client import RegistryResolutionError, ResolvedAsset
+from registry.client import (
+    RegistryRecordMalformedError,
+    RegistryResolutionError,
+    ResolvedAsset,
+)
 from registry.resolver import select_highest
 
 if TYPE_CHECKING:
@@ -83,9 +87,16 @@ class AgentRegistryClient:
                 return {}
             try:
                 fm = yaml.safe_load(m.group(1))
-            except yaml.YAMLError:
-                # nosemgrep: py-silent-success-masking -- invalid YAML is unreadable payload
-                return {}
+            except yaml.YAMLError as exc:
+                # A YAML parse failure must NOT collapse to `{}`: that erases the
+                # publisher (attribution) and runtime, making a malformed record
+                # indistinguishable from an empty one and letting attacker-influenced
+                # input drop an audit-critical trust field (#791). Surface it so
+                # resolve() rejects the record. Mirrors parseSkillFrontmatter in
+                # agent-registry-client.ts.
+                raise RegistryRecordMalformedError(
+                    f"SKILL.md frontmatter is not valid YAML: {exc}"
+                ) from exc
             if not isinstance(fm, dict):
                 return {}
             raw_value = fm.get(_SKILL_RUNTIME_FM_KEY)
@@ -165,6 +176,15 @@ class AgentRegistryClient:
         # _meta/CUSTOM body or an out-of-band write can produce this.
         try:
             runtime = self._extract_runtime(winner)
+        except RegistryRecordMalformedError as exc:
+            # Distinct from REMOVED: the payload is present but unparseable, so its
+            # attribution/runtime were erased — reject rather than trust `{}` (#791).
+            raise RegistryResolutionError(
+                "MALFORMED",
+                ref_str,
+                f"resolved {ref.kind}/{ref.namespace}/{ref.name}@{winning} "
+                f"has malformed frontmatter: {exc}",
+            ) from exc
         except (ValueError, json.JSONDecodeError) as exc:
             raise RegistryResolutionError(
                 "REMOVED",

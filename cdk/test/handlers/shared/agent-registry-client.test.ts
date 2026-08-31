@@ -26,7 +26,11 @@ import {
 } from '@aws-sdk/client-agent-registry-control';
 import { AgentRegistryClient } from '../../../src/handlers/shared/registry/agent-registry-client';
 import { parseRef } from '../../../src/handlers/shared/registry/ref';
-import { RegistryPublishIncompleteError, RegistryResolutionError } from '../../../src/handlers/shared/registry/types';
+import {
+  RegistryPublishIncompleteError,
+  RegistryRecordMalformedError,
+  RegistryResolutionError,
+} from '../../../src/handlers/shared/registry/types';
 
 const RUNTIME_META_KEY = 'dev.abca.runtime';
 
@@ -435,6 +439,94 @@ describe('AgentRegistryClient', () => {
     if (!parsed.ok) throw new Error('fixture ref should parse');
     await expect(client.resolve(parsed.ref)).rejects.toMatchObject({ reason: 'REMOVED' });
     await expect(client.resolve(parsed.ref)).rejects.toBeInstanceOf(RegistryResolutionError);
+  });
+
+  // A SKILL.md whose frontmatter block is present but not valid YAML (unterminated
+  // flow sequence). A parse failure must reject the record, not collapse to `{}` —
+  // which would erase the publisher (attribution) and runtime (#791).
+  const seedMalformedSkill = (fake: FakeClient, status = 'APPROVED'): string =>
+    fake.seed({
+      name: 'skill/acme/readme-helper',
+      recordType: 'SKILL',
+      descriptors: {
+        agentSkillsDefinition: {
+          additionalData: { skillMd: { data: '---\nname: acme-readme-helper\nx-abca-runtime: [1, 2\n---\n# body' } },
+        },
+      },
+      recordVersion: '1.0.0',
+      status,
+    });
+
+  test('resolve fails closed (MALFORMED) when the winning record has unparseable frontmatter', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    seedMalformedSkill(fake);
+    const parsed = parseRef('registry://skill/acme/readme-helper@1.0.0');
+    if (!parsed.ok) throw new Error('fixture ref should parse');
+    await expect(client.resolve(parsed.ref)).rejects.toMatchObject({ reason: 'MALFORMED' });
+    await expect(client.resolve(parsed.ref)).rejects.toBeInstanceOf(RegistryResolutionError);
+  });
+
+  test('resolve rejects a malformed winner rather than downgrading to a lower valid version', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    // A valid lower version exists, but the highest matching version is malformed.
+    // Silently picking the lower one would mask that the pinned version is corrupt.
+    fake.seed({
+      name: 'skill/acme/readme-helper',
+      recordType: 'SKILL',
+      descriptors: {
+        agentSkillsDefinition: {
+          additionalData: {
+            skillMd: {
+              data:
+                `---\nname: acme-readme-helper\nx-abca-runtime: ${Buffer.from(JSON.stringify({ prompt_fragment: 'ok' })).toString('base64')}\n---\n# body`,
+            },
+          },
+        },
+      },
+      recordVersion: '1.0.0',
+      status: 'APPROVED',
+    });
+    fake.seed({
+      name: 'skill/acme/readme-helper',
+      recordType: 'SKILL',
+      descriptors: {
+        agentSkillsDefinition: {
+          additionalData: { skillMd: { data: '---\nname: acme-readme-helper\nx-abca-runtime: [1, 2\n---\n# body' } },
+        },
+      },
+      recordVersion: '1.1.0',
+      status: 'APPROVED',
+    });
+    const parsed = parseRef('registry://skill/acme/readme-helper@^1.0.0');
+    if (!parsed.ok) throw new Error('fixture ref should parse');
+    await expect(client.resolve(parsed.ref)).rejects.toMatchObject({ reason: 'MALFORMED' });
+  });
+
+  test('getRecord throws RegistryRecordMalformedError for a malformed target record', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    seedMalformedSkill(fake, 'DRAFT');
+    await expect(client.getRecord('skill', 'acme', 'readme-helper', '1.0.0')).rejects.toBeInstanceOf(
+      RegistryRecordMalformedError,
+    );
+  });
+
+  test('listRecords skips a malformed record but returns the healthy ones', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    seedMalformedSkill(fake);
+    fake.seed({
+      name: 'mcp_server/acme/pdf-tools',
+      recordType: 'MCP',
+      descriptors: { mcpServer: { data: JSON.stringify({ name: 'acme/pdf-tools', version: '1.0.0', _meta: { [RUNTIME_META_KEY]: { transport: 'http', url: 'https://x' } } }) } },
+      recordVersion: '1.0.0',
+      status: 'APPROVED',
+    });
+    const records = await client.listRecords();
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ kind: 'mcp_server', name: 'pdf-tools' });
   });
 
   test('publish (native MCP) preserves a caller-supplied discovery._meta alongside ABCA keys', async () => {

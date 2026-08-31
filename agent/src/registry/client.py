@@ -33,13 +33,25 @@ class ResolvedAsset:
 
 class RegistryResolutionError(Exception):
     """Raised when a ref cannot be resolved. ``reason`` matches the TS token set
-    (``NO_MATCHING_VERSION`` / ``REMOVED`` / ``INVALID_CONSTRAINT`` /
-    ``INVALID_REGISTRY_REF``) so both languages agree on *why*."""
+    (``NO_MATCHING_VERSION`` / ``REMOVED`` / ``MALFORMED`` /
+    ``INVALID_CONSTRAINT`` / ``INVALID_REGISTRY_REF``) so both languages agree on
+    *why*."""
 
     def __init__(self, reason: str, ref: str, message: str) -> None:
         super().__init__(message)
         self.reason = reason
         self.ref = ref
+
+
+class RegistryRecordMalformedError(Exception):
+    """Raised when a record's descriptor payload is present but unparseable — e.g.
+    a SKILL.md frontmatter block that fails to YAML-parse. Distinct from an
+    *absent* record and from an *empty* runtime: a malformed payload must be
+    rejected, not silently collapsed to ``{}``. Collapsing erases the publisher
+    (attribution) and runtime, making a malformed record indistinguishable from a
+    legitimately empty one and letting attacker-influenced input drop an
+    audit-critical trust field (#791). Mirrors ``RegistryRecordMalformedError`` in
+    ``cdk/src/handlers/shared/registry/types.ts``."""
 
 
 class RegistryClient(Protocol):

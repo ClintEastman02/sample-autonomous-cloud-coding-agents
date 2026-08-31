@@ -53,6 +53,7 @@ import {
   PUBLISHER_META_KEY,
   RUNTIME_META_KEY,
   RegistryPublishIncompleteError,
+  RegistryRecordMalformedError,
   RegistryResolutionError,
   type ListFilter,
   type PublishInput,
@@ -77,6 +78,46 @@ function isNonEmptyRuntime(runtime: unknown): boolean {
     !Array.isArray(runtime) &&
     Object.keys(runtime as Record<string, unknown>).length > 0
   );
+}
+
+/** Coordinates read straight from the record envelope (name/version/status),
+ *  which stay readable even when the descriptor payload does not parse. */
+interface RecordCoords {
+  readonly kind: string;
+  readonly namespace: string;
+  readonly name: string;
+  readonly version: string;
+  readonly status: RegistryStatus;
+}
+
+/** A record whose envelope is readable but whose descriptor payload (SKILL.md
+ *  frontmatter) failed to parse. Identity comes from the envelope, so the read
+ *  paths can skip it (browse) or reject it (resolve/getRecord) precisely,
+ *  without trusting the erased payload (#791). */
+interface MalformedRecordEntry {
+  readonly malformed: true;
+  readonly coords: RecordCoords;
+  readonly recordId: string;
+  readonly error: RegistryRecordMalformedError;
+}
+
+type RecordEntry = RegistryRecord | MalformedRecordEntry;
+
+function isMalformed(entry: RecordEntry): entry is MalformedRecordEntry {
+  return (entry as MalformedRecordEntry).malformed === true;
+}
+
+/** Coordinates of an entry regardless of whether it parsed. */
+function entryCoords(entry: RecordEntry): RecordCoords {
+  return isMalformed(entry)
+    ? entry.coords
+    : {
+      kind: entry.kind,
+      namespace: entry.namespace,
+      name: entry.name,
+      version: entry.version,
+      status: entry.status,
+    };
 }
 
 /** Kinds that map onto a native Agent Registry record type. */
@@ -143,21 +184,31 @@ function buildSkillMd(input: {
 }
 
 /** Extract and YAML-parse the frontmatter block (between the first `---`/`---`
- *  pair) into an object. Returns {} when there is no valid block. Parsing the
- *  whole block as one document (rather than a per-line regex) is what makes key
- *  injection via a newline-bearing value impossible — a duplicate key is a YAML
- *  error, and a value's newline stays inside that value. */
+ *  pair) into an object. Returns {} when there is *no* block at all (a record
+ *  legitimately without frontmatter). A block that is present but fails to parse
+ *  throws {@link RegistryRecordMalformedError} — it must NOT collapse to `{}`,
+ *  which would erase the publisher/runtime and make a malformed record look
+ *  empty (#791). Parsing the whole block as one document (rather than a per-line
+ *  regex) is what makes key injection via a newline-bearing value impossible — a
+ *  duplicate key is a YAML error, and a value's newline stays inside that value;
+ *  surfacing that error (rather than swallowing it) is what keeps the injection
+ *  defense live. */
 function parseSkillFrontmatter(skillMd: string): Record<string, unknown> {
   const m = skillMd.match(/^---\n([\s\S]*?)\n---/);
   if (!m) return {};
+  let parsed: unknown;
   try {
-    const parsed = yaml.load(m[1], { json: true });
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : {};
-  } catch {
-    return {}; // nosemgrep: ts-silent-success-masking -- invalid YAML becomes an unreadable payload
+    parsed = yaml.load(m[1], { json: true });
+  } catch (err) {
+    throw new RegistryRecordMalformedError(
+      'MALFORMED_FRONTMATTER',
+      `SKILL.md frontmatter is not valid YAML: ${err instanceof Error ? err.message : String(err)}`,
+      err,
+    );
   }
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    ? (parsed as Record<string, unknown>)
+    : {};
 }
 
 /** Recover the publisher (Cognito sub) from the parsed SKILL.md frontmatter. */
@@ -270,9 +321,13 @@ export class AgentRegistryClient implements RegistryClient {
         );
       }
 
-      const record = await this.getRecordById(recordId);
-      if (!record) throw new Error(`published record ${recordId} not readable after write`);
-      return record;
+      const entry = await this.loadRecordById(recordId);
+      if (!entry) throw new Error(`published record ${recordId} not readable after write`);
+      // The record we just serialized should always parse; if it doesn't, the
+      // write produced a corrupt descriptor — surface it (the catch below wraps
+      // it as a stranded-record error) rather than returning it.
+      if (isMalformed(entry)) throw entry.error;
+      return entry;
     } catch (err) {
       logger.error('registry publish incomplete — partial record stranded', {
         recordId,
@@ -299,16 +354,48 @@ export class AgentRegistryClient implements RegistryClient {
   ): Promise<RegistryRecord | null> {
     // Agent Registry keys records by opaque id, not our coordinates, and List is
     // eventually consistent — so scan the (small) record set and match.
-    const records = await this.listRecords({ kind, namespace });
-    return records.find((r) => r.name === name && r.version === version) ?? null;
+    const entries = await this.loadEntries({ kind, namespace });
+    const match = entries.find(
+      (e) => entryCoords(e).name === name && entryCoords(e).version === version,
+    );
+    if (!match) return null;
+    // Fail closed on the targeted record: a malformed frontmatter erased its
+    // publisher/runtime, so hand back the parse failure rather than a record
+    // with silently-dropped attribution (#791).
+    if (isMalformed(match)) throw match.error;
+    return match;
   }
 
   async listRecords(filter?: ListFilter): Promise<readonly RegistryRecord[]> {
-    // O(n): List + one GetRegistryRecord per summary, and every read
-    // path (resolve/show/getRecord) funnels through here. Fine at MVP catalog
-    // sizes; revisit with a secondary coordinate index if large catalogs make
-    // the per-record round trips material.
+    // Browse tolerates a poisoned record: skip a malformed one (with a loud
+    // warning) so one corrupt SKILL.md can't break listing an entire namespace.
+    // The trust-critical paths (resolve/getRecord) still reject it precisely.
+    const entries = await this.loadEntries(filter);
     const out: RegistryRecord[] = [];
+    for (const entry of entries) {
+      if (isMalformed(entry)) {
+        logger.warn('Skipping malformed registry record during list', {
+          record_id: entry.recordId,
+          kind: entry.coords.kind,
+          namespace: entry.coords.namespace,
+          name: entry.coords.name,
+          version: entry.coords.version,
+          error: entry.error.message,
+        });
+        continue;
+      }
+      out.push(entry);
+    }
+    return out;
+  }
+
+  /** Load every record matching `filter` as an entry that is either a parsed
+   *  record or a malformed marker. O(n): List + one GetRegistryRecord per
+   *  summary, and every read path (resolve/show/getRecord) funnels through here.
+   *  Fine at MVP catalog sizes; revisit with a secondary coordinate index if
+   *  large catalogs make the per-record round trips material. */
+  private async loadEntries(filter?: ListFilter): Promise<RecordEntry[]> {
+    const out: RecordEntry[] = [];
     let nextToken: string | undefined;
     do {
       const page = await this.client.send(
@@ -324,8 +411,8 @@ export class AgentRegistryClient implements RegistryClient {
         if (filter?.namespace && decoded.namespace !== filter.namespace) continue;
         const recordId = summary.recordArn ? this.idFromArn(summary.recordArn) : summary.recordId;
         if (!recordId) continue;
-        const full = await this.getRecordById(recordId);
-        if (full) out.push(full);
+        const entry = await this.loadRecordById(recordId);
+        if (entry) out.push(entry);
       }
       nextToken = page.nextToken;
     } while (nextToken);
@@ -336,15 +423,19 @@ export class AgentRegistryClient implements RegistryClient {
 
   async resolve(ref: ParsedRef): Promise<ResolvedAsset> {
     const refStr = `registry://${ref.kind}/${ref.namespace}/${ref.name}@${ref.constraint.raw}`;
-    const all = await this.listRecords({ kind: ref.kind, namespace: ref.namespace });
-    const forName = all.filter((r) => r.name === ref.name);
+    // Consider malformed entries as candidates too: a malformed record still has
+    // a readable version/status from its envelope, so if it is the winning
+    // version we must reject it rather than silently downgrade to a lower one.
+    const all = await this.loadEntries({ kind: ref.kind, namespace: ref.namespace });
+    const forName = all.filter((e) => entryCoords(e).name === ref.name);
 
     // Only APPROVED / DEPRECATED are resolution candidates.
-    const candidates = forName.filter(
-      (r) => r.status === 'APPROVED' || r.status === 'DEPRECATED',
-    );
+    const candidates = forName.filter((e) => {
+      const status = entryCoords(e).status;
+      return status === 'APPROVED' || status === 'DEPRECATED';
+    });
     const winningVersion = selectHighest(
-      candidates.map((r) => r.version),
+      candidates.map((e) => entryCoords(e).version),
       ref.constraint,
     );
     if (!winningVersion) {
@@ -354,7 +445,17 @@ export class AgentRegistryClient implements RegistryClient {
         `no approved version of ${ref.kind}/${ref.namespace}/${ref.name} satisfies ${ref.constraint.raw}`,
       );
     }
-    const winner = candidates.find((r) => r.version === winningVersion)!;
+    const winner = candidates.find((e) => entryCoords(e).version === winningVersion)!;
+    // Fail closed: the resolved winner's frontmatter is unparseable, so its
+    // publisher/runtime were erased. Reject rather than trust an empty payload
+    // or silently pick a different version (#791).
+    if (isMalformed(winner)) {
+      throw new RegistryResolutionError(
+        'MALFORMED',
+        refStr,
+        `resolved ${winner.coords.kind}/${winner.coords.namespace}/${winner.coords.name}@${winner.coords.version} has malformed frontmatter: ${winner.error.message}`,
+      );
+    }
     // Fail closed: an otherwise-resolvable record whose runtime payload is
     // empty/unreadable must NOT resolve to `{}` — that would let a task run with
     // a missing/substituted asset while the audit claims the pin was honored
@@ -423,7 +524,7 @@ export class AgentRegistryClient implements RegistryClient {
     );
   }
 
-  private async getRecordById(recordId: string): Promise<RegistryRecord | null> {
+  private async loadRecordById(recordId: string): Promise<RecordEntry | null> {
     let raw;
     try {
       raw = await this.client.send(
@@ -436,17 +537,31 @@ export class AgentRegistryClient implements RegistryClient {
       throw err;
     }
     const decoded = this.decodeName(raw.name ?? '');
-    const { runtime, storageMode, discovery, publisher } = this.extractPayload(raw);
-    return {
+    const coords: RecordCoords = {
       kind: decoded.kind,
       namespace: decoded.namespace,
       name: decoded.name,
       version: raw.recordVersion ?? '',
       status: (raw.status ?? 'DRAFT') as RegistryStatus,
-      storageMode,
-      discovery,
-      runtime,
-      publisher,
+    };
+    let payload;
+    try {
+      payload = this.extractPayload(raw);
+    } catch (err) {
+      // A malformed descriptor payload keeps its envelope identity but its
+      // publisher/runtime are unreadable — carry it as a marker so the read
+      // paths can skip (browse) or reject (resolve/getRecord) it precisely.
+      if (err instanceof RegistryRecordMalformedError) {
+        return { malformed: true, coords, recordId, error: err };
+      }
+      throw err;
+    }
+    return {
+      ...coords,
+      storageMode: payload.storageMode,
+      discovery: payload.discovery,
+      runtime: payload.runtime,
+      publisher: payload.publisher,
       createdAt: raw.createdAt ? raw.createdAt.toISOString() : undefined,
     };
   }
