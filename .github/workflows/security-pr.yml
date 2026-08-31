@@ -69,26 +69,28 @@ jobs:
           case "$EVENT_NAME" in
             pull_request)
               # Scan exactly the commits this PR introduces.
-              echo "range=${PR_BASE_SHA}..${PR_HEAD_SHA}" >> "$GITHUB_OUTPUT"
-              echo "baseline=${PR_BASE_SHA}" >> "$GITHUB_OUTPUT"
+              range="${PR_BASE_SHA}..${PR_HEAD_SHA}"
+              baseline="${PR_BASE_SHA}"
               ;;
             merge_group)
               # Scan only the queued merge commits — not full history. An empty
               # range would walk every ref and fail on secrets on other branches
               # (#334 merge-queue ejection).
-              echo "range=${MG_BASE_SHA}..${MG_HEAD_SHA}" >> "$GITHUB_OUTPUT"
-              echo "baseline=${MG_BASE_SHA}" >> "$GITHUB_OUTPUT"
+              range="${MG_BASE_SHA}..${MG_HEAD_SHA}"
+              baseline="${MG_BASE_SHA}"
               ;;
             workflow_dispatch|*)
               # Manual dispatch: scan HEAD only (safe default, not full history).
               # baseline=HEAD reports only uncommitted findings (none in CI), so
               # the ratchet is a no-op here — the full scan lives in security.yml.
-              echo "range=HEAD" >> "$GITHUB_OUTPUT"
-              echo "baseline=HEAD" >> "$GITHUB_OUTPUT"
+              range="HEAD"
+              baseline="HEAD"
               ;;
           esac
-          echo "Resolved GITLEAKS_RANGE='$(grep '^range=' "$GITHUB_OUTPUT" | tail -n1 | cut -d= -f2-)'"
-          echo "Resolved SEMGREP_MASKING_BASELINE='$(grep '^baseline=' "$GITHUB_OUTPUT" | tail -n1 | cut -d= -f2-)'"
+          echo "range=${range}" >> "$GITHUB_OUTPUT"
+          echo "baseline=${baseline}" >> "$GITHUB_OUTPUT"
+          echo "Resolved GITLEAKS_RANGE='${range}'"
+          echo "Resolved SEMGREP_MASKING_BASELINE='${baseline}'"
 
       - name: Secret scan (gitleaks, range-scoped)
         env:
