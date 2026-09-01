@@ -120,6 +120,24 @@ class TestExtractRuntime:
         with pytest.raises(RegistryRecordMalformedError):
             _client()._extract_runtime(raw)
 
+    def test_agent_skills_undecodable_runtime_raises_malformed(self):
+        # Frontmatter parses as valid YAML, but x-abca-runtime base64-decodes to a
+        # non-JSON string — must classify as MALFORMED (mirrors the TS adapter),
+        # not collapse to {} or leak a bare ValueError (PR #837 review).
+        bad = base64.b64encode(b"not json").decode()
+        with pytest.raises(RegistryRecordMalformedError):
+            _client()._extract_runtime(self._skill_md(f"x-abca-runtime: {bad}"))
+
+    def test_custom_invalid_json_raises_malformed(self):
+        raw = {"recordType": "CUSTOM", "descriptors": {"custom": {"data": "not json{"}}}
+        with pytest.raises(RegistryRecordMalformedError):
+            _client()._extract_runtime(raw)
+
+    def test_mcp_invalid_json_raises_malformed(self):
+        raw = {"recordType": "MCP", "descriptors": {"mcpServer": {"data": "{bad json"}}}
+        with pytest.raises(RegistryRecordMalformedError):
+            _client()._extract_runtime(raw)
+
     def test_agent_skills_newline_description_cannot_inject_runtime_key(self):
         # B1 (#246): a description carrying a newline + a second x-abca-runtime
         # line must not shadow the validated runtime. Frontmatter emitted by the
@@ -206,3 +224,66 @@ class TestResolveFailClosed:
         with pytest.raises(RegistryResolutionError) as exc:
             self._resolve([record], "registry://skill/acme/readme-helper@1.0.0")
         assert exc.value.reason == "MALFORMED"
+
+    def test_fails_malformed_when_runtime_value_undecodable(self):
+        # Valid YAML frontmatter but an undecodable x-abca-runtime value must be
+        # MALFORMED, not REMOVED — matching the TS adapter (PR #837 review).
+        bad = base64.b64encode(b"not json").decode()
+        skill_md = f"---\nname: acme-readme-helper\nx-abca-runtime: {bad}\n---\nbody"
+        record = {
+            "recordId": "rec-1.0.0",
+            "name": "skill/acme/readme-helper",
+            "recordType": "SKILL",
+            "descriptors": {
+                "agentSkillsDefinition": {"additionalData": {"skillMd": {"data": skill_md}}}
+            },
+            "recordVersion": "1.0.0",
+            "status": "APPROVED",
+        }
+        with pytest.raises(RegistryResolutionError) as exc:
+            self._resolve([record], "registry://skill/acme/readme-helper@1.0.0")
+        assert exc.value.reason == "MALFORMED"
+
+    def test_fails_malformed_when_custom_body_invalid(self):
+        record = {
+            "recordId": "rec-1.0.0",
+            "name": "cedar_policy_module/acme/permit",
+            "recordType": "CUSTOM",
+            "descriptors": {"custom": {"data": "not json{"}},
+            "recordVersion": "1.0.0",
+            "status": "APPROVED",
+        }
+        with pytest.raises(RegistryResolutionError) as exc:
+            self._resolve([record], "registry://cedar_policy_module/acme/permit@1.0.0")
+        assert exc.value.reason == "MALFORMED"
+
+    def test_fails_malformed_when_mcp_body_invalid(self):
+        record = {
+            "recordId": "rec-1.0.0",
+            "name": "mcp_server/acme/pdf-tools",
+            "recordType": "MCP",
+            "descriptors": {"mcpServer": {"data": "{bad json"}},
+            "recordVersion": "1.0.0",
+            "status": "APPROVED",
+        }
+        with pytest.raises(RegistryResolutionError) as exc:
+            self._resolve([record], "registry://mcp_server/acme/pdf-tools@1.0.0")
+        assert exc.value.reason == "MALFORMED"
+
+    def test_get_record_fails_closed_on_malformed_target(self):
+        # Parity with TS getRecord, which throws for a malformed target rather than
+        # handing back a record whose attribution was silently erased (#791).
+        skill_md = "---\nname: acme-readme-helper\nx-abca-runtime: [1, 2\n---\nbody"
+        record = {
+            "recordId": "rec-1.0.0",
+            "name": "skill/acme/readme-helper",
+            "recordType": "SKILL",
+            "descriptors": {
+                "agentSkillsDefinition": {"additionalData": {"skillMd": {"data": skill_md}}}
+            },
+            "recordVersion": "1.0.0",
+            "status": "DRAFT",
+        }
+        client = AgentRegistryClient("r", _FakeBoto([record]))
+        with pytest.raises(RegistryRecordMalformedError):
+            client.get_record("skill", "acme", "readme-helper", "1.0.0")

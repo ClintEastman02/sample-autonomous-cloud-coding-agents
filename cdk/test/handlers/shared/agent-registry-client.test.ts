@@ -504,6 +504,104 @@ describe('AgentRegistryClient', () => {
     await expect(client.resolve(parsed.ref)).rejects.toMatchObject({ reason: 'MALFORMED' });
   });
 
+  // Corruption past the frontmatter YAML: the block parses as valid YAML, but the
+  // descriptor value inside is undecodable. These must classify as MALFORMED too —
+  // #791's browse-tolerance / show-flagging / resolve-reject guarantees have to
+  // hold for every descriptor parse point, not just the YAML block (PR #837 review).
+  const seedCorruptRuntimeSkill = (fake: FakeClient, status = 'APPROVED'): string =>
+    fake.seed({
+      name: 'skill/acme/readme-helper',
+      recordType: 'SKILL',
+      descriptors: {
+        agentSkillsDefinition: {
+          // Valid YAML frontmatter, but x-abca-runtime base64-decodes to a
+          // non-JSON string ("not json"), so JSON.parse throws.
+          additionalData: {
+            skillMd: {
+              data: `---\nname: acme-readme-helper\nx-abca-runtime: ${Buffer.from('not json').toString('base64')}\n---\n# body`,
+            },
+          },
+        },
+      },
+      recordVersion: '1.0.0',
+      status,
+    });
+
+  const seedCorruptCustom = (fake: FakeClient, status = 'APPROVED'): string =>
+    fake.seed({
+      name: 'cedar_policy_module/acme/permit',
+      recordType: 'CUSTOM',
+      descriptors: { custom: { data: 'not json{' } },
+      recordVersion: '1.0.0',
+      status,
+    });
+
+  const seedCorruptMcp = (fake: FakeClient, status = 'APPROVED'): string =>
+    fake.seed({
+      name: 'mcp_server/acme/pdf-tools',
+      recordType: 'MCP',
+      descriptors: { mcpServer: { data: '{bad json' } },
+      recordVersion: '1.0.0',
+      status,
+    });
+
+  test('resolve fails closed (MALFORMED) when x-abca-runtime is undecodable base64/JSON', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    seedCorruptRuntimeSkill(fake);
+    const parsed = parseRef('registry://skill/acme/readme-helper@1.0.0');
+    if (!parsed.ok) throw new Error('fixture ref should parse');
+    await expect(client.resolve(parsed.ref)).rejects.toMatchObject({ reason: 'MALFORMED' });
+    await expect(client.resolve(parsed.ref)).rejects.toBeInstanceOf(RegistryResolutionError);
+  });
+
+  test('resolve fails closed (MALFORMED) when a CUSTOM body is not valid JSON', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    seedCorruptCustom(fake);
+    const parsed = parseRef('registry://cedar_policy_module/acme/permit@1.0.0');
+    if (!parsed.ok) throw new Error('fixture ref should parse');
+    await expect(client.resolve(parsed.ref)).rejects.toMatchObject({ reason: 'MALFORMED' });
+  });
+
+  test('resolve fails closed (MALFORMED) when an MCP server.json is not valid JSON', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    seedCorruptMcp(fake);
+    const parsed = parseRef('registry://mcp_server/acme/pdf-tools@1.0.0');
+    if (!parsed.ok) throw new Error('fixture ref should parse');
+    await expect(client.resolve(parsed.ref)).rejects.toMatchObject({ reason: 'MALFORMED' });
+  });
+
+  test('listRecords tolerates a corrupt CUSTOM/MCP/runtime record (skips, does not abort the namespace)', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    // Three differently-corrupt records + one healthy MCP. Before the fix, any of
+    // the corrupt three threw a raw SyntaxError that aborted the whole listing.
+    seedCorruptRuntimeSkill(fake);
+    seedCorruptCustom(fake);
+    seedCorruptMcp(fake);
+    fake.seed({
+      name: 'mcp_server/acme/healthy',
+      recordType: 'MCP',
+      descriptors: { mcpServer: { data: JSON.stringify({ name: 'acme/healthy', version: '1.0.0', _meta: { [RUNTIME_META_KEY]: { transport: 'http', url: 'https://x' } } }) } },
+      recordVersion: '1.0.0',
+      status: 'APPROVED',
+    });
+    const records = await client.listRecords();
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ kind: 'mcp_server', name: 'healthy' });
+  });
+
+  test('getRecord throws RegistryRecordMalformedError for a corrupt-runtime target record', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    seedCorruptRuntimeSkill(fake, 'DRAFT');
+    await expect(client.getRecord('skill', 'acme', 'readme-helper', '1.0.0')).rejects.toBeInstanceOf(
+      RegistryRecordMalformedError,
+    );
+  });
+
   test('getRecord throws RegistryRecordMalformedError for a malformed target record', async () => {
     const fake = new FakeClient();
     const client = makeClient(fake);

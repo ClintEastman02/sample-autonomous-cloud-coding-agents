@@ -153,15 +153,29 @@ export class RegistryResolutionError extends Error {
   }
 }
 
+/** Which stage of descriptor decoding failed. Every arm is a *present but
+ *  unparseable* payload — the discriminator lets a reader tell YAML-frontmatter
+ *  corruption apart from a bad `x-abca-runtime` value or a non-JSON CUSTOM/MCP
+ *  body without re-inspecting the cause. */
+export type MalformedReason =
+  // MALFORMED_FRONTMATTER: SKILL.md frontmatter block failed to YAML-parse.
+  // MALFORMED_RUNTIME: `x-abca-runtime` value is not decodable base64/JSON.
+  // MALFORMED_DESCRIPTOR: CUSTOM or MCP descriptor body is not valid JSON.
+  | 'MALFORMED_FRONTMATTER'
+  | 'MALFORMED_RUNTIME'
+  | 'MALFORMED_DESCRIPTOR';
+
 /**
- * Raised when a record's descriptor payload is present but unparseable — e.g. a
- * SKILL.md frontmatter block that fails to YAML-parse. Distinct from an *absent*
- * record and from an *empty* runtime: a malformed payload must be rejected, not
- * silently collapsed to `{}`. Collapsing erases the publisher (attribution) and
- * runtime, making a malformed record indistinguishable from a legitimately empty
- * one and letting attacker-influenced input drop an audit-critical trust field
- * (#791). The frontmatter-injection defense itself (#664/#246 B1/B2) lives on
- * the *write* side — `buildSkillMd` emits every value through a YAML dumper that
+ * Raised when a record's descriptor payload is present but unparseable — a
+ * SKILL.md frontmatter block that fails to YAML-parse, an `x-abca-runtime` value
+ * that is not decodable base64/JSON, or a CUSTOM/MCP body that is not valid JSON
+ * (see {@link MalformedReason}). Distinct from an *absent* record and from an
+ * *empty* runtime: a malformed payload must be rejected, not silently collapsed
+ * to `{}`. Collapsing erases the publisher (attribution) and runtime, making a
+ * malformed record indistinguishable from a legitimately empty one and letting
+ * attacker-influenced input drop an audit-critical trust field (#791). The
+ * frontmatter-injection defense itself (#664/#246 B1/B2) lives on the *write*
+ * side — `buildSkillMd` emits every value through a YAML dumper that
  * quotes/escapes newlines, so no discovery field can smuggle a shadowing key;
  * surfacing a genuine parse failure here is about not masking corruption, not
  * about the injection defense. Mirrors `RegistryRecordMalformedError` in
@@ -169,7 +183,7 @@ export class RegistryResolutionError extends Error {
  */
 export class RegistryRecordMalformedError extends Error {
   constructor(
-    readonly reason: 'MALFORMED_FRONTMATTER',
+    readonly reason: MalformedReason,
     message: string,
     readonly cause?: unknown,
   ) {

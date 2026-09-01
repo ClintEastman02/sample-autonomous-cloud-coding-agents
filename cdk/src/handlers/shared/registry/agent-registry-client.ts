@@ -229,12 +229,38 @@ function parseSkillRuntime(skillMd: string): unknown {
   const raw = parseSkillFrontmatter(skillMd)[SKILL_RUNTIME_FM_KEY];
   if (typeof raw !== 'string') return {};
   // Legacy form: raw JSON (YAML has already unwrapped its single-quoting, so the
-  // value arrives starting with `{`). New form: base64-encoded JSON.
+  // value arrives starting with `{`). New form: base64-encoded JSON. A present
+  // but undecodable value must NOT slip out as a raw SyntaxError: box it as
+  // MALFORMED so `loadRecordById` carries it as a marker and the read paths
+  // skip/reject it precisely, exactly as they do for bad frontmatter (#791).
   const trimmed = raw.trim();
-  if (trimmed.startsWith('{')) {
-    return JSON.parse(trimmed);
+  try {
+    if (trimmed.startsWith('{')) {
+      return JSON.parse(trimmed);
+    }
+    return JSON.parse(Buffer.from(raw, 'base64').toString('utf-8'));
+  } catch (err) {
+    throw new RegistryRecordMalformedError(
+      'MALFORMED_RUNTIME',
+      `SKILL.md ${SKILL_RUNTIME_FM_KEY} is not decodable base64/JSON: ${err instanceof Error ? err.message : String(err)}`,
+      err,
+    );
   }
-  return JSON.parse(Buffer.from(raw, 'base64').toString('utf-8'));
+}
+
+/** JSON.parse a descriptor body, boxing a parse failure as a MALFORMED marker
+ *  (rather than a raw SyntaxError) so a corrupt CUSTOM/MCP body funnels through
+ *  the same skip/reject read paths as bad SKILL.md frontmatter (#791). */
+function parseDescriptorJson(data: string, what: string): Record<string, unknown> {
+  try {
+    return JSON.parse(data);
+  } catch (err) {
+    throw new RegistryRecordMalformedError(
+      'MALFORMED_DESCRIPTOR',
+      `${what} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+      err,
+    );
+  }
 }
 
 export interface AgentRegistryClientOptions {
@@ -361,7 +387,7 @@ export class AgentRegistryClient implements RegistryClient {
       (e) => entryCoords(e).name === name && entryCoords(e).version === version,
     );
     if (!match) return null;
-    // Fail closed on the targeted record: a malformed frontmatter erased its
+    // Fail closed on the targeted record: a malformed descriptor erased its
     // publisher/runtime, so hand back the parse failure rather than a record
     // with silently-dropped attribution (#791).
     if (isMalformed(match)) throw match.error;
@@ -462,21 +488,21 @@ export class AgentRegistryClient implements RegistryClient {
       );
     }
     const winner = candidates.find((e) => entryCoords(e).version === winningVersion)!;
-    // Fail closed: the resolved winner's frontmatter is unparseable, so its
+    // Fail closed: the resolved winner's descriptor is unparseable, so its
     // publisher/runtime were erased. Reject rather than trust an empty payload
     // or silently pick a different version (#791).
     if (isMalformed(winner)) {
       throw new RegistryResolutionError(
         'MALFORMED',
         refStr,
-        `resolved ${winner.coords.kind}/${winner.coords.namespace}/${winner.coords.name}@${winner.coords.version} has malformed frontmatter: ${winner.error.message}`,
+        `resolved ${winner.coords.kind}/${winner.coords.namespace}/${winner.coords.name}@${winner.coords.version} has a malformed descriptor (${winner.error.reason}): ${winner.error.message}`,
       );
     }
     // Fail closed: an otherwise-resolvable record whose runtime payload is
-    // empty/unreadable must NOT resolve to `{}` — that would let a task run with
-    // a missing/substituted asset while the audit claims the pin was honored
-    // (REGISTRY.md §8). A record can reach this state via an out-of-band write or
-    // a corrupt `_meta`/CUSTOM body that slipped past publish validation.
+    // empty must NOT resolve to `{}` — that would let a task run with a
+    // missing/substituted asset while the audit claims the pin was honored
+    // (REGISTRY.md §8). A record can reach this state via an out-of-band write;
+    // a corrupt descriptor is caught above as MALFORMED.
     if (!isNonEmptyRuntime(winner.runtime)) {
       throw new RegistryResolutionError(
         'REMOVED',
@@ -591,7 +617,7 @@ export class AgentRegistryClient implements RegistryClient {
     publisher?: string;
   } {
     if (raw.recordType === 'CUSTOM') {
-      const body = JSON.parse(raw.descriptors?.custom?.data ?? '{}');
+      const body = parseDescriptorJson(raw.descriptors?.custom?.data ?? '{}', 'CUSTOM record body');
       return {
         runtime: body.runtime as RuntimePayload,
         storageMode: 'custom',
@@ -612,13 +638,15 @@ export class AgentRegistryClient implements RegistryClient {
     }
     // MCP: JSON server.json with the runtime in a `_meta` block.
     const inline = raw.descriptors?.mcpServer?.data ?? '{}';
-    const body = JSON.parse(inline);
-    const meta = body._meta?.[RUNTIME_META_KEY];
-    const publisher = body._meta?.[PUBLISHER_META_KEY];
+    const body = parseDescriptorJson(inline, 'MCP server.json body');
+    const meta = body._meta && typeof body._meta === 'object' && !Array.isArray(body._meta)
+      ? (body._meta as Record<string, unknown>)
+      : {};
+    const publisher = meta[PUBLISHER_META_KEY];
     return {
-      runtime: meta as RuntimePayload,
+      runtime: meta[RUNTIME_META_KEY] as RuntimePayload,
       storageMode: 'native',
-      discovery: body as Record<string, unknown>,
+      discovery: body,
       publisher: typeof publisher === 'string' ? publisher : undefined,
     };
   }
