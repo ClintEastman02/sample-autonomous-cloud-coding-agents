@@ -18,6 +18,7 @@
  */
 
 import {
+  ConflictException,
   CreateRegistryRecordCommand,
   GetRegistryRecordCommand,
   ListRegistryRecordsCommand,
@@ -676,5 +677,155 @@ describe('AgentRegistryClient', () => {
     const meta = (record.discovery as Record<string, unknown>)._meta as Record<string, unknown>;
     // ABCA runtime rides under its key AND the caller's own _meta key survives.
     expect(meta).toMatchObject({ [RUNTIME_META_KEY]: runtime, 'io.example.custom': { keep: true } });
+  });
+
+  // --- publisher preservation (the property this PR is named after) -----------
+
+  const seedHealthyMcp = (fake: FakeClient, meta: Record<string, unknown>, status = 'APPROVED'): string =>
+    fake.seed({
+      name: 'mcp_server/acme/pdf-tools',
+      recordType: 'MCP',
+      descriptors: {
+        mcpServer: {
+          data: JSON.stringify({
+            name: 'acme/pdf-tools',
+            version: '1.0.0',
+            _meta: { [RUNTIME_META_KEY]: { transport: 'http', url: 'https://x' }, ...meta },
+          }),
+        },
+      },
+      recordVersion: '1.0.0',
+      status,
+    });
+
+  test('resolve/getRecord preserve a healthy record publisher (read-path positive control)', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    seedHealthyMcp(fake, { 'dev.abca.publisher': 'cognito-sub-999' });
+    const record = await client.getRecord('mcp_server', 'acme', 'pdf-tools', '1.0.0');
+    // If PUBLISHER_META_KEY/parse regresses, attribution silently drops from every
+    // healthy record — this pins it.
+    expect(record?.publisher).toBe('cognito-sub-999');
+  });
+
+  // A publisher that is *present but wrong-typed* must fail closed as MALFORMED:
+  // coercing it to `undefined` would leave the record APPROVED and loadable while
+  // attribution is silently erased — #791's vulnerability verbatim (#837 review).
+  test.each([
+    ['a number', 123],
+    ['an array', ['cognito-sub']],
+    ['an object', { sub: 'x' }],
+  ])('getRecord rejects a healthy record whose publisher is %s (MALFORMED, not silent drop)', async (_label, badPublisher) => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    seedHealthyMcp(fake, { 'dev.abca.publisher': badPublisher });
+    await expect(client.getRecord('mcp_server', 'acme', 'pdf-tools', '1.0.0')).rejects.toBeInstanceOf(
+      RegistryRecordMalformedError,
+    );
+  });
+
+  // --- wrong-shape descriptors (valid JSON, not an object) --------------------
+
+  // JSON.parse succeeds on these, so the pre-#837 boxing (catch SyntaxError only)
+  // walked them straight through and the next line dereferenced a non-object,
+  // escaping resolve as an opaque 500 across the whole namespace (#837 review).
+  test.each([
+    ['null', 'null'],
+    ['a number', '123'],
+    ['an array', '[1, 2]'],
+    ['a string', '"just a string"'],
+  ])('resolve fails closed (MALFORMED) when a CUSTOM body parses to %s', async (_label, data) => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    fake.seed({
+      name: 'cedar_policy_module/acme/permit',
+      recordType: 'CUSTOM',
+      descriptors: { custom: { data } },
+      recordVersion: '1.0.0',
+      status: 'APPROVED',
+    });
+    const parsed = parseRef('registry://cedar_policy_module/acme/permit@1.0.0');
+    if (!parsed.ok) throw new Error('fixture ref should parse');
+    await expect(client.resolve(parsed.ref)).rejects.toMatchObject({ reason: 'MALFORMED' });
+  });
+
+  test('resolve fails closed (MALFORMED) when an MCP body parses to a non-object', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    fake.seed({
+      name: 'mcp_server/acme/pdf-tools',
+      recordType: 'MCP',
+      descriptors: { mcpServer: { data: '[1, 2]' } },
+      recordVersion: '1.0.0',
+      status: 'APPROVED',
+    });
+    const parsed = parseRef('registry://mcp_server/acme/pdf-tools@1.0.0');
+    if (!parsed.ok) throw new Error('fixture ref should parse');
+    await expect(client.resolve(parsed.ref)).rejects.toMatchObject({ reason: 'MALFORMED' });
+  });
+
+  test('resolve fails closed (MALFORMED) when SKILL.md frontmatter is a non-mapping (not a bare {})', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    fake.seed({
+      name: 'skill/acme/readme-helper',
+      recordType: 'SKILL',
+      descriptors: {
+        agentSkillsDefinition: { additionalData: { skillMd: { data: '---\n- a\n- b\n---\n# body' } } },
+      },
+      recordVersion: '1.0.0',
+      status: 'APPROVED',
+    });
+    const parsed = parseRef('registry://skill/acme/readme-helper@1.0.0');
+    if (!parsed.ok) throw new Error('fixture ref should parse');
+    await expect(client.resolve(parsed.ref)).rejects.toMatchObject({ reason: 'MALFORMED' });
+  });
+
+  // --- 422 body must not echo raw descriptor bytes ----------------------------
+
+  test('resolve MALFORMED message carries the discriminator, never the raw descriptor bytes', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    // An unterminated JSON body embedding a secret-looking token; Node's parser
+    // error quotes a window around the failure position that could include it.
+    fake.seed({
+      name: 'mcp_server/acme/pdf-tools',
+      recordType: 'MCP',
+      descriptors: { mcpServer: { data: '{"_meta": {"dev.abca.runtime": SUPERSECRETTOKEN' } },
+      recordVersion: '1.0.0',
+      status: 'APPROVED',
+    });
+    const parsed = parseRef('registry://mcp_server/acme/pdf-tools@1.0.0');
+    if (!parsed.ok) throw new Error('fixture ref should parse');
+    const err = await client.resolve(parsed.ref).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RegistryResolutionError);
+    expect((err as RegistryResolutionError).message).toContain('MALFORMED_DESCRIPTOR');
+    expect((err as RegistryResolutionError).message).not.toContain('SUPERSECRETTOKEN');
+  });
+
+  // --- publish over a corrupt slot is a conflict (409), not an opaque 500 -----
+
+  test('publish over coordinates holding a malformed record throws ConflictException (not a bare 500)', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    // A corrupt record already occupies mcp_server/acme/pdf-tools@1.0.0.
+    fake.seed({
+      name: 'mcp_server/acme/pdf-tools',
+      recordType: 'MCP',
+      descriptors: { mcpServer: { data: '{bad json' } },
+      recordVersion: '1.0.0',
+      status: 'APPROVED',
+    });
+    const err = await client.publish({
+      kind: 'mcp_server',
+      namespace: 'acme',
+      name: 'pdf-tools',
+      version: '1.0.0',
+      discovery: { name: 'acme/pdf-tools', description: 'd', version: '1.0.0' },
+      runtime: { transport: 'http' as const, url: 'https://x' },
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConflictException);
+    // Never attempted to create over the occupied (corrupt) slot.
+    expect(fake.sent).toEqual([]);
   });
 });

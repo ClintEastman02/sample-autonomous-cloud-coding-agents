@@ -174,7 +174,7 @@ export type MalformedReason =
  * to `{}`. Collapsing erases the publisher (attribution) and runtime, making a
  * malformed record indistinguishable from a legitimately empty one and letting
  * attacker-influenced input drop an audit-critical trust field (#791). The
- * frontmatter-injection defense itself (#664/#246 B1/B2) lives on the *write*
+ * frontmatter-injection defense itself (#246 review B1/B2) lives on the *write*
  * side — `buildSkillMd` emits every value through a YAML dumper that
  * quotes/escapes newlines, so no discovery field can smuggle a shadowing key;
  * surfacing a genuine parse failure here is about not masking corruption, not

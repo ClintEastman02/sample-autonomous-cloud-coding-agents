@@ -44,15 +44,22 @@ _SKILL_FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---", re.DOTALL)
 _RESOLVABLE_STATUSES = ("APPROVED", "DEPRECATED")
 
 
-def _decode_descriptor_json(data: str, what: str) -> Any:
-    """json.loads a descriptor body, boxing a parse failure as a malformed marker
-    (not a raw ValueError) so a corrupt CUSTOM/MCP/runtime body classifies as
-    MALFORMED rather than REMOVED — mirrors parseDescriptorJson in
-    agent-registry-client.ts."""
+def _decode_descriptor_json(data: str, what: str) -> dict[str, Any]:
+    """json.loads a CUSTOM/MCP descriptor body into a dict, boxing any failure as a
+    malformed marker (not a raw ValueError/AttributeError) so a corrupt body
+    classifies as MALFORMED rather than REMOVED — mirrors parseDescriptorJson in
+    agent-registry-client.ts. ``json.loads`` also succeeds on non-objects
+    (``null``, ``[1,2]``, ``123``, ``"s"``), and the caller immediately calls
+    ``.get`` on the result — so a successful parse that is not a dict is rejected
+    here rather than raising an unboxed AttributeError that would escape resolve()
+    as an opaque error (#837 review)."""
     try:
-        return json.loads(data)
+        parsed = json.loads(data)
     except (ValueError, TypeError) as exc:
         raise RegistryRecordMalformedError(f"{what} is not valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise RegistryRecordMalformedError(f"{what} is not a JSON object")
+    return parsed
 
 
 class AgentRegistryClient:
@@ -112,8 +119,15 @@ class AgentRegistryClient:
                 raise RegistryRecordMalformedError(
                     f"SKILL.md frontmatter is not valid YAML: {exc}"
                 ) from exc
-            if not isinstance(fm, dict):
+            # An empty block (`---\n\n---`) parses to None — a record legitimately
+            # without frontmatter. A block that parses to a non-mapping (a sequence
+            # or a bare scalar) is corrupt: reject it as MALFORMED rather than
+            # collapse to `{}`, which would hide the corruption the way an
+            # unparseable block would (#791 / #837 review).
+            if fm is None:
                 return {}
+            if not isinstance(fm, dict):
+                raise RegistryRecordMalformedError("SKILL.md frontmatter is not a mapping")
             raw_value = fm.get(_SKILL_RUNTIME_FM_KEY)
             if not isinstance(raw_value, str):
                 return {}
@@ -129,10 +143,16 @@ class AgentRegistryClient:
                 raise RegistryRecordMalformedError(
                     f"SKILL.md {_SKILL_RUNTIME_FM_KEY} is not decodable base64/JSON: {exc}"
                 ) from exc
-        # MCP: JSON server.json with the runtime in a `_meta` block.
+        # MCP: JSON server.json with the runtime in a `_meta` block. A valid
+        # server.json may carry a non-object `_meta` (or none); guard the shape so
+        # `{"_meta": "x"}` does not raise an unboxed AttributeError — mirrors the
+        # dict guard in extractPayload in agent-registry-client.ts (#837 review).
         inline = descriptors.get("mcpServer", {}).get("data") or "{}"
         body = _decode_descriptor_json(inline, "MCP server.json body")
-        return body.get("_meta", {}).get(_RUNTIME_META_KEY, {})
+        meta = body.get("_meta")
+        if not isinstance(meta, dict):
+            return {}
+        return meta.get(_RUNTIME_META_KEY, {})
 
     def _list_records(self, kind: str, namespace: str) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -175,7 +195,9 @@ class AgentRegistryClient:
                 # _extract_runtime) rather than hand back a record whose attribution
                 # is silently gone. Mirrors getRecord in agent-registry-client.ts,
                 # which throws RegistryRecordMalformedError for the same case (#791).
-                self._extract_runtime(raw)
+                # Called for its side effect: it raises if the descriptor is
+                # malformed; the parsed value is discarded (get_record returns raw).
+                _ = self._extract_runtime(raw)
                 return raw
         return None
 
@@ -210,11 +232,15 @@ class AgentRegistryClient:
             # attribution/runtime were erased — reject rather than trust `{}` (#791).
             # _extract_runtime boxes every parse/decode failure as this error, so
             # both languages classify a corrupt descriptor as MALFORMED (not REMOVED).
+            # Keep the parser text (which can echo raw descriptor bytes) off the
+            # message and on the exception chain (`from exc`) only — the TS twin
+            # returns this reason on an open 422, so neither side leaks the payload
+            # (#837 review).
             raise RegistryResolutionError(
                 "MALFORMED",
                 ref_str,
                 f"resolved {ref.kind}/{ref.namespace}/{ref.name}@{winning} "
-                f"has a malformed descriptor: {exc}",
+                f"has a malformed descriptor",
             ) from exc
         if not isinstance(runtime, dict) or not runtime:
             raise RegistryResolutionError(

@@ -49,13 +49,13 @@ class RegistryRecordMalformedError(Exception):
     value that is not decodable base64/JSON, or a CUSTOM/MCP body that is not valid
     JSON. Distinct from an *absent* record and from an *empty* runtime: a malformed
     payload must be rejected, not silently collapsed to ``{}``. Collapsing erases
-    the publisher (attribution) and runtime, making a malformed record
-    indistinguishable from a legitimately empty one and letting attacker-influenced
-    input drop an audit-critical trust field (#791). Mirrors
-    ``RegistryRecordMalformedError`` in
-    ``cdk/src/handlers/shared/registry/types.ts`` (the TS twin additionally carries
-    a ``reason`` discriminator and ``cause``; the agent only needs the fail-closed
-    signal, so those are intentionally omitted here)."""
+    the runtime the agent is here to load (and, on the TS write/read side, the
+    publisher attribution), making a malformed record indistinguishable from a
+    legitimately empty one (#791). Mirrors ``RegistryRecordMalformedError`` in
+    ``cdk/src/handlers/shared/registry/types.ts`` — the TS twin additionally
+    carries an explicit ``reason`` discriminator field the agent has no consumer
+    for, so that field is omitted here; the underlying cause still travels on
+    ``__cause__`` via ``raise ... from exc`` at every raise site."""
 
 
 class RegistryClient(Protocol):

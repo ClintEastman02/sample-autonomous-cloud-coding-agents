@@ -137,7 +137,7 @@ The registry API is a **separate API Gateway** from the main Task API (its own `
 
 ### 7.4 `GET /registry/records/{kind}/{namespace}/{name}` — show
 
-- Response `200`: `{ kind, namespace, name, versions: [{ version, status, created_at, publisher }] }` (highest-first).
+- Response `200`: `{ kind, namespace, name, versions: [{ version, status, created_at, publisher, malformed? }] }` (highest-first). A version whose descriptor payload failed to parse carries `malformed: true` with `publisher`/`created_at` `null` — surfaced (not hidden) so a corrupt version is visible to operators (#791).
 
 ## 8. Resolution semantics
 

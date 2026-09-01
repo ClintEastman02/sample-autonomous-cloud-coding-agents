@@ -56,6 +56,7 @@ import {
   RegistryRecordMalformedError,
   RegistryResolutionError,
   type ListFilter,
+  type MalformedReason,
   type PublishInput,
   type RegistryBrowseEntry,
   type RegistryRecord,
@@ -91,8 +92,9 @@ interface RecordCoords {
   readonly status: RegistryStatus;
 }
 
-/** A record whose envelope is readable but whose descriptor payload (SKILL.md
- *  frontmatter) failed to parse. Identity comes from the envelope, so the read
+/** A record whose envelope is readable but whose descriptor payload failed to
+ *  parse — any {@link MalformedReason}: SKILL.md frontmatter, an `x-abca-runtime`
+ *  value, or a CUSTOM/MCP JSON body. Identity comes from the envelope, so the read
  *  paths can skip it (browse) or reject it (resolve/getRecord) precisely,
  *  without trusting the erased payload (#791). */
 interface MalformedRecordEntry {
@@ -208,15 +210,34 @@ function parseSkillFrontmatter(skillMd: string): Record<string, unknown> {
       err,
     );
   }
-  return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-    ? (parsed as Record<string, unknown>)
-    : {};
+  // An empty block (`---\n\n---`) is a record legitimately without frontmatter.
+  if (parsed === null || parsed === undefined) return {};
+  // A block that parses to a non-mapping (a sequence `- a\n- b`, or a bare scalar)
+  // is corrupt: collapsing it to `{}` would erase the publisher/runtime and let
+  // `show`/`list` surface it as an ordinary healthy record while attribution is
+  // silently gone. Reject it as MALFORMED, same as an unparseable block (#791).
+  if (typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new RegistryRecordMalformedError(
+      'MALFORMED_FRONTMATTER',
+      'SKILL.md frontmatter is not a mapping',
+    );
+  }
+  return parsed as Record<string, unknown>;
+}
+
+/** Read a publisher (Cognito sub) field. Absent stays absent, but a *present but
+ *  wrong-typed* value (`123`, `["sub"]`) is a MALFORMED descriptor — coercing it
+ *  to `undefined` would silently erase attribution while the record stays
+ *  APPROVED and loadable, which is #791's vulnerability verbatim. */
+function readPublisherField(value: unknown, reason: MalformedReason): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === 'string') return value;
+  throw new RegistryRecordMalformedError(reason, 'publisher field is present but not a string');
 }
 
 /** Recover the publisher (Cognito sub) from the parsed SKILL.md frontmatter. */
 function parseSkillPublisher(skillMd: string): string | undefined {
-  const v = parseSkillFrontmatter(skillMd)[PUBLISHER_FM_KEY];
-  return typeof v === 'string' ? v : undefined;
+  return readPublisherField(parseSkillFrontmatter(skillMd)[PUBLISHER_FM_KEY], 'MALFORMED_FRONTMATTER');
 }
 
 /** Recover the ABCA runtime payload from a SKILL.md's `x-abca-runtime`
@@ -248,12 +269,18 @@ function parseSkillRuntime(skillMd: string): unknown {
   }
 }
 
-/** JSON.parse a descriptor body, boxing a parse failure as a MALFORMED marker
- *  (rather than a raw SyntaxError) so a corrupt CUSTOM/MCP body funnels through
- *  the same skip/reject read paths as bad SKILL.md frontmatter (#791). */
+/** JSON.parse a descriptor body into an object, boxing any failure as a MALFORMED
+ *  marker (rather than a raw SyntaxError/TypeError) so a corrupt CUSTOM/MCP body
+ *  funnels through the same skip/reject read paths as bad SKILL.md frontmatter
+ *  (#791). `JSON.parse` succeeds on non-objects too (`"null"`, `"[1,2]"`, `"123"`,
+ *  `"\"s\""`), and the callers immediately dereference the result — so a
+ *  successful parse that is not a plain object is rejected here rather than
+ *  crashing the next line with an unboxed `TypeError` that would escape `resolve`
+ *  as an opaque 500 and take down the whole namespace listing (#837 review). */
 function parseDescriptorJson(data: string, what: string): Record<string, unknown> {
+  let parsed: unknown;
   try {
-    return JSON.parse(data);
+    parsed = JSON.parse(data);
   } catch (err) {
     throw new RegistryRecordMalformedError(
       'MALFORMED_DESCRIPTOR',
@@ -261,6 +288,13 @@ function parseDescriptorJson(data: string, what: string): Record<string, unknown
       err,
     );
   }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new RegistryRecordMalformedError(
+      'MALFORMED_DESCRIPTOR',
+      `${what} is not a JSON object`,
+    );
+  }
+  return parsed as Record<string, unknown>;
 }
 
 export interface AgentRegistryClientOptions {
@@ -299,8 +333,23 @@ export class AgentRegistryClient implements RegistryClient {
     const useCustom = input.custom || !(input.kind in NATIVE_RECORD_TYPE_BY_KIND);
     const name = this.encodeName(input.kind, input.namespace, input.name);
 
-    // Immutability: reject a re-publish of the same coordinates.
-    const existing = await this.getRecord(input.kind, input.namespace, input.name, input.version);
+    // Immutability: reject a re-publish of the same coordinates. `getRecord`
+    // throws RegistryRecordMalformedError when a corrupt record already occupies
+    // them — that is still an occupied slot, so treat it as a conflict (409) with
+    // a corruption hint rather than letting it fall through to an opaque 500 that
+    // names neither the conflict nor the corruption (#837 review).
+    let existing: RegistryRecord | null;
+    try {
+      existing = await this.getRecord(input.kind, input.namespace, input.name, input.version);
+    } catch (err) {
+      if (err instanceof RegistryRecordMalformedError) {
+        throw new ConflictException({
+          message: `record ${name}@${input.version} already exists but its descriptor is malformed (${err.reason}); delete it before republishing`,
+          $metadata: {},
+        });
+      }
+      throw err;
+    }
     if (existing) {
       throw new ConflictException({
         message: `record ${name}@${input.version} already exists`,
@@ -492,10 +541,26 @@ export class AgentRegistryClient implements RegistryClient {
     // publisher/runtime were erased. Reject rather than trust an empty payload
     // or silently pick a different version (#791).
     if (isMalformed(winner)) {
+      // Keep the parser text (which can echo a fragment of the raw descriptor —
+      // a token in a `url` query string, an `Authorization` header value) out of
+      // the client-facing 422 body: resolve/list/show are open to any
+      // authenticated caller (REGISTRY.md §10), and the resolve handler returns
+      // this message verbatim, bypassing `redactRuntimeForResponse`. Surface only
+      // the coordinates + the `MalformedReason` discriminator; log the detail for
+      // the operator (#837 review).
+      logger.error('resolve rejected a malformed winner', {
+        recordId: winner.recordId,
+        kind: winner.coords.kind,
+        namespace: winner.coords.namespace,
+        name: winner.coords.name,
+        version: winner.coords.version,
+        reason: winner.error.reason,
+        error: winner.error.message,
+      });
       throw new RegistryResolutionError(
         'MALFORMED',
         refStr,
-        `resolved ${winner.coords.kind}/${winner.coords.namespace}/${winner.coords.name}@${winner.coords.version} has a malformed descriptor (${winner.error.reason}): ${winner.error.message}`,
+        `resolved ${winner.coords.kind}/${winner.coords.namespace}/${winner.coords.name}@${winner.coords.version} has a malformed descriptor (${winner.error.reason})`,
       );
     }
     // Fail closed: an otherwise-resolvable record whose runtime payload is
@@ -622,7 +687,7 @@ export class AgentRegistryClient implements RegistryClient {
         runtime: body.runtime as RuntimePayload,
         storageMode: 'custom',
         discovery: (body.discovery ?? {}) as Record<string, unknown>,
-        publisher: typeof body.publisher === 'string' ? body.publisher : undefined,
+        publisher: readPublisherField(body.publisher, 'MALFORMED_DESCRIPTOR'),
       };
     }
     if (raw.recordType === 'SKILL') {
@@ -642,12 +707,11 @@ export class AgentRegistryClient implements RegistryClient {
     const meta = body._meta && typeof body._meta === 'object' && !Array.isArray(body._meta)
       ? (body._meta as Record<string, unknown>)
       : {};
-    const publisher = meta[PUBLISHER_META_KEY];
     return {
       runtime: meta[RUNTIME_META_KEY] as RuntimePayload,
       storageMode: 'native',
       discovery: body,
-      publisher: typeof publisher === 'string' ? publisher : undefined,
+      publisher: readPublisherField(meta[PUBLISHER_META_KEY], 'MALFORMED_DESCRIPTOR'),
     };
   }
 
