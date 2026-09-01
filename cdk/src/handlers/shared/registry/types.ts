@@ -100,6 +100,23 @@ export interface RegistryRecord {
   readonly createdAt?: string;
 }
 
+/** A record as a browse surface (`show`) sees it: either fully parsed, or a
+ *  marker that a record exists at these coordinates but its descriptor payload
+ *  did not parse. The envelope coordinates (name/version/status) stay readable
+ *  even when the payload is corrupt, so `show` can surface the version — flagged
+ *  as malformed — instead of dropping it and 404-ing an asset whose only
+ *  versions are corrupt (#791). */
+export type RegistryBrowseEntry =
+  | { readonly malformed: false; readonly record: RegistryRecord }
+  | {
+    readonly malformed: true;
+    readonly kind: string;
+    readonly namespace: string;
+    readonly name: string;
+    readonly version: string;
+    readonly status: RegistryStatus;
+  };
+
 /** What the resolver hands back for one ref: enough to load the asset without the
  *  caller knowing where the bytes live. */
 export interface ResolvedAsset {
@@ -143,9 +160,11 @@ export class RegistryResolutionError extends Error {
  * silently collapsed to `{}`. Collapsing erases the publisher (attribution) and
  * runtime, making a malformed record indistinguishable from a legitimately empty
  * one and letting attacker-influenced input drop an audit-critical trust field
- * (#791). It also disarms the duplicate-key frontmatter-injection defense
- * (#664/#246 B1/B2), which relies on the YAML error surfacing rather than being
- * swallowed. Mirrors `RegistryRecordMalformedError` in
+ * (#791). The frontmatter-injection defense itself (#664/#246 B1/B2) lives on
+ * the *write* side — `buildSkillMd` emits every value through a YAML dumper that
+ * quotes/escapes newlines, so no discovery field can smuggle a shadowing key;
+ * surfacing a genuine parse failure here is about not masking corruption, not
+ * about the injection defense. Mirrors `RegistryRecordMalformedError` in
  * `agent/src/registry/client.py`.
  */
 export class RegistryRecordMalformedError extends Error {

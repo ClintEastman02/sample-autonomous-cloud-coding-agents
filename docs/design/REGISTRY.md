@@ -125,7 +125,7 @@ The registry API is a **separate API Gateway** from the main Task API (its own `
 
 - Parses the ref, gathers candidate versions, ranks by semver, applies the constraint + status rules (§8).
 - Response `200`: `{ kind, namespace, name, version, runtime, warnings[] }`.
-- Failure: `422 REGISTRY_RESOLUTION_FAILED` with `reason ∈ { NO_MATCHING_VERSION, REMOVED, INVALID_CONSTRAINT, INVALID_REGISTRY_REF }`.
+- Failure: `422 REGISTRY_RESOLUTION_FAILED` with `reason ∈ { NO_MATCHING_VERSION, REMOVED, INVALID_CONSTRAINT, INVALID_REGISTRY_REF, MALFORMED }`. `MALFORMED` means the winning record's descriptor is present but unparseable (e.g. SKILL.md frontmatter that fails to YAML-parse) — it is rejected rather than resolved with erased attribution (#791), and never downgraded to a lower valid version.
 
 ### 7.3 `GET /registry/records?kind=&namespace=` — list
 
@@ -158,7 +158,7 @@ The registry API is a **separate API Gateway** from the main Task API (its own `
 | `DEPRECATED` | yes | resolves + `warnings: ["DEPRECATED"]` |
 | `DRAFT`, `PENDING_APPROVAL`, `REJECTED`, `CREATING` | no | not a candidate; if the only match → `NO_MATCHING_VERSION` |
 
-**Fail-closed:** any unresolved ref fails task admission with `REGISTRY_RESOLUTION_FAILED`. A running task never re-resolves or substitutes.
+**Fail-closed:** any unresolved ref fails task admission with `REGISTRY_RESOLUTION_FAILED`. A running task never re-resolves or substitutes. A candidate whose descriptor is present but unparseable rejects the ref with `MALFORMED` — it is never silently skipped in favour of a lower valid version, so a corrupt payload cannot cause a stale downgrade (#791).
 
 ## 9. Access control (MVP)
 

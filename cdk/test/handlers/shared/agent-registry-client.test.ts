@@ -529,6 +529,39 @@ describe('AgentRegistryClient', () => {
     expect(records[0]).toMatchObject({ kind: 'mcp_server', name: 'pdf-tools' });
   });
 
+  test('listBrowseEntries keeps a malformed record as an envelope-only marker', async () => {
+    // Unlike listRecords, browse entries retain the malformed record so `show`
+    // can surface a corrupt version instead of 404-ing the asset (#791).
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    seedMalformedSkill(fake);
+    const entries = await client.listBrowseEntries({ kind: 'skill', namespace: 'acme' });
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      malformed: true,
+      kind: 'skill',
+      namespace: 'acme',
+      name: 'readme-helper',
+      version: '1.0.0',
+      status: 'APPROVED',
+    });
+  });
+
+  test('listBrowseEntries wraps a healthy record under { malformed: false, record }', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    fake.seed({
+      name: 'mcp_server/acme/pdf-tools',
+      recordType: 'MCP',
+      descriptors: { mcpServer: { data: JSON.stringify({ name: 'acme/pdf-tools', version: '1.0.0', _meta: { [RUNTIME_META_KEY]: { transport: 'http', url: 'https://x' } } }) } },
+      recordVersion: '1.0.0',
+      status: 'APPROVED',
+    });
+    const entries = await client.listBrowseEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ malformed: false, record: { kind: 'mcp_server', name: 'pdf-tools' } });
+  });
+
   test('publish (native MCP) preserves a caller-supplied discovery._meta alongside ABCA keys', async () => {
     const fake = new FakeClient();
     const client = makeClient(fake);

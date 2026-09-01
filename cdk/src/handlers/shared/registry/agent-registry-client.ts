@@ -57,6 +57,7 @@ import {
   RegistryResolutionError,
   type ListFilter,
   type PublishInput,
+  type RegistryBrowseEntry,
   type RegistryRecord,
   type RegistryStatus,
   type ResolvedAsset,
@@ -188,11 +189,12 @@ function buildSkillMd(input: {
  *  legitimately without frontmatter). A block that is present but fails to parse
  *  throws {@link RegistryRecordMalformedError} — it must NOT collapse to `{}`,
  *  which would erase the publisher/runtime and make a malformed record look
- *  empty (#791). Parsing the whole block as one document (rather than a per-line
- *  regex) is what makes key injection via a newline-bearing value impossible — a
- *  duplicate key is a YAML error, and a value's newline stays inside that value;
- *  surfacing that error (rather than swallowing it) is what keeps the injection
- *  defense live. */
+ *  empty (#791). Parsing the whole block as one YAML document (rather than a
+ *  per-line regex) means a newline-bearing value stays inside its value instead
+ *  of being read as a second key — but the injection defense proper is on the
+ *  write side (`buildSkillMd` quotes/escapes via the YAML dumper). Note a
+ *  *duplicate* key does not raise under `json: true` (last value wins), so this
+ *  parse does not itself reject duplicate-key documents. */
 function parseSkillFrontmatter(skillMd: string): Record<string, unknown> {
   const m = skillMd.match(/^---\n([\s\S]*?)\n---/);
   if (!m) return {};
@@ -387,6 +389,20 @@ export class AgentRegistryClient implements RegistryClient {
       out.push(entry);
     }
     return out;
+  }
+
+  async listBrowseEntries(filter?: ListFilter): Promise<readonly RegistryBrowseEntry[]> {
+    // Unlike listRecords, keep malformed records as envelope-only markers so
+    // `show` can surface a corrupt version (flagged) instead of dropping it and
+    // making an all-malformed asset look absent (#791).
+    const entries = await this.loadEntries(filter);
+    return entries.map((entry) => {
+      if (isMalformed(entry)) {
+        const { kind, namespace, name, version, status } = entry.coords;
+        return { malformed: true, kind, namespace, name, version, status };
+      }
+      return { malformed: false, record: entry };
+    });
   }
 
   /** Load every record matching `filter` as an entry that is either a parsed
