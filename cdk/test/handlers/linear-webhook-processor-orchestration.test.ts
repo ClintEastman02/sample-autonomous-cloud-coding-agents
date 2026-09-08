@@ -124,6 +124,7 @@ process.env.TASK_TABLE_NAME = 'TaskTable';
 process.env.ORCHESTRATION_TABLE_NAME = 'OrchestrationTable';
 
 import { handler } from '../../src/handlers/linear-webhook-processor';
+import { LOOKUP_ABSENT, lookupFound } from '../../src/handlers/shared/lookup-result';
 
 function eventWith(payload: Record<string, unknown>): { raw_body: string } {
   return { raw_body: JSON.stringify(payload) };
@@ -720,7 +721,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
 
   /** Mock for a PLAIN (non-orchestration) issue: no parent, no orchestration snapshot, only the GSI hit. */
   function mockStandaloneOnly(standalone: { task_id: string; user_id?: string; repo?: string; pr_url?: string; pr_number?: number; status?: string } | null): void {
-    fetchIssueParentIdMock.mockResolvedValue(null); // no parent ⇒ not a sub-issue
+    fetchIssueParentIdMock.mockResolvedValue(LOOKUP_ABSENT); // no parent ⇒ not a sub-issue
     ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
       if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') {
         return { Items: standalone ? [standalone] : [] };
@@ -738,7 +739,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
     createTaskCoreMock.mockReset().mockResolvedValue({ statusCode: 201, body: '{}' });
     resolveLinearOauthTokenMock.mockReset()
       .mockResolvedValue({ accessToken: 'tok', oauthSecretArn: 'arn:secret', workspaceSlug: 'acme' });
-    fetchIssueParentIdMock.mockReset().mockResolvedValue('PARENT');
+    fetchIssueParentIdMock.mockReset().mockResolvedValue(lookupFound('PARENT'));
     discoverOrchestrationMock.mockReset();
     reactToCommentMock.mockReset().mockResolvedValue(true);
     replyToCommentMock.mockReset().mockResolvedValue(true);
@@ -925,7 +926,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
     // A Query failure and a genuine miss are different facts. Collapsing them told
     // the user their issue is not ours, which is a guess dressed as a conclusion —
     // and it hides a real fault (throttling, a missing GSI) behind a silent no-op.
-    fetchIssueParentIdMock.mockResolvedValue(null);
+    fetchIssueParentIdMock.mockResolvedValue(LOOKUP_ABSENT);
     ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
       // ONLY the GSI query fails — everything else (the redelivery claim, the
       // commenter authorization) must still work, or the nudge would be skipped
@@ -948,7 +949,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
   });
 
   test('@bgagent on a sub-issue whose parent is not an orchestration AND no ABCA task → no task', async () => {
-    fetchIssueParentIdMock.mockResolvedValue('PARENT');
+    fetchIssueParentIdMock.mockResolvedValue(lookupFound('PARENT'));
     ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
       if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') return { Items: [] };
       return { Items: [] }; // loadOrchestration → no snapshot
@@ -967,7 +968,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
     // Even with a fully actionable iteration target, a commenter with NO linked
     // platform user must not be able to start a code-pushing run billed to the
     // requester. The mapping Get returns nothing → the gate blocks before dispatch.
-    fetchIssueParentIdMock.mockResolvedValue(null);
+    fetchIssueParentIdMock.mockResolvedValue(LOOKUP_ABSENT);
     ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
       if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') {
         return { Items: [{ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', pr_number: 99 }] };

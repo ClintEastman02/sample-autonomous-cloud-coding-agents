@@ -585,10 +585,12 @@ describe('generateInviteCode', () => {
 describe('queryLinearTeamKeys', () => {
   // Returned keys are persisted on the registry row at install time and
   // drive prefix-routing inside the screenshot processor — see #96. The
-  // helper intentionally swallows every failure path (returns []) so a
-  // transient Linear outage during `setup` doesn't abort the OAuth
-  // dance. Coverage verifies (a) the happy-path normalization and (b)
-  // every failure mode collapses to [].
+  // helper never throws (a transient Linear outage during `setup` must not
+  // abort the OAuth dance), but it distinguishes success-with-keys from a
+  // network/auth/GraphQL failure via a discriminated result (#756 Cat 2) so
+  // the caller can warn instead of silently persisting "no teams". Coverage
+  // verifies (a) happy-path normalization, (b) an empty-but-valid workspace
+  // is `ok`, and (c) every failure mode surfaces `ok: false`.
   const originalFetch = global.fetch;
   afterEach(() => {
     global.fetch = originalFetch;
@@ -611,9 +613,9 @@ describe('queryLinearTeamKeys', () => {
       }),
     }) as unknown as typeof fetch;
 
-    const keys = await queryLinearTeamKeys('Bearer tok');
+    const result = await queryLinearTeamKeys('Bearer tok');
 
-    expect(keys).toEqual(['ABCA', 'PLAT', 'WEB']);
+    expect(result).toEqual({ ok: true, keys: ['ABCA', 'PLAT', 'WEB'] });
     expect(global.fetch).toHaveBeenCalledWith(
       'https://api.linear.app/graphql',
       expect.objectContaining({
@@ -640,32 +642,35 @@ describe('queryLinearTeamKeys', () => {
       }),
     }) as unknown as typeof fetch;
 
-    expect(await queryLinearTeamKeys('Bearer tok')).toEqual(['ABCA']);
+    expect(await queryLinearTeamKeys('Bearer tok')).toEqual({ ok: true, keys: ['ABCA'] });
   });
 
-  test('returns [] when Linear responds non-2xx', async () => {
+  test('fails (ok: false) when Linear responds non-2xx', async () => {
     global.fetch = jest.fn().mockResolvedValue({
       ok: false,
       status: 500,
       json: async () => ({}),
     }) as unknown as typeof fetch;
 
-    expect(await queryLinearTeamKeys('Bearer tok')).toEqual([]);
+    const result = await queryLinearTeamKeys('Bearer tok');
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toBeInstanceOf(Error);
   });
 
-  test('returns [] when fetch itself throws (network failure)', async () => {
-    global.fetch = jest.fn().mockRejectedValue(new Error('ECONNRESET')) as unknown as typeof fetch;
+  test('fails (ok: false) when fetch itself throws (network failure)', async () => {
+    const err = new Error('ECONNRESET');
+    global.fetch = jest.fn().mockRejectedValue(err) as unknown as typeof fetch;
 
-    expect(await queryLinearTeamKeys('Bearer tok')).toEqual([]);
+    expect(await queryLinearTeamKeys('Bearer tok')).toEqual({ ok: false, error: err });
   });
 
-  test('returns [] when GraphQL response shape is missing teams.nodes', async () => {
+  test('succeeds with no keys when GraphQL response shape is missing teams.nodes', async () => {
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ data: {} }),
     }) as unknown as typeof fetch;
 
-    expect(await queryLinearTeamKeys('Bearer tok')).toEqual([]);
+    expect(await queryLinearTeamKeys('Bearer tok')).toEqual({ ok: true, keys: [] });
   });
 });
 

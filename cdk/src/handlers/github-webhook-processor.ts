@@ -34,6 +34,7 @@ import {
   findLinearIssueByIdentifier,
 } from './shared/linear-issue-lookup';
 import { logger } from './shared/logger';
+import { type LookupResult, LOOKUP_ABSENT, lookupFailed, lookupFound, lookupValueOr } from './shared/lookup-result';
 import { isIntegrationNode } from './shared/orchestration-integration-node';
 import { buildScreenshotKey, encodeMarkdownUrl, extractTaskIdFromBranch, isAllowedScreenshotUrl } from './shared/screenshot-url';
 import { makeClient, makeDocClient } from './shared/ua';
@@ -344,7 +345,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
           // link to that reply now (in place). Find the most-recent iteration
           // reply id for this issue and edit it; idempotent via the [preview]
           // marker so a webhook redelivery won't double-append.
-          const iter = await findIterationReplyId(linearIssue.issueId, sha);
+          const iter = lookupValueOr(await findIterationReplyId(linearIssue.issueId, sha), null);
           if (iter) {
             // (1) Durably persist the screenshot onto the ITERATION task so the
             // terminal-settle renders the thumbnail from a strongly-consistent
@@ -412,8 +413,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
 async function findIterationReplyId(
   linearIssueId: string,
   deploySha?: string,
-): Promise<{ replyId: string; taskId: string } | null> {
-  if (!TASK_TABLE) return null;
+): Promise<LookupResult<{ replyId: string; taskId: string }>> {
+  if (!TASK_TABLE) return LOOKUP_ABSENT;
   try {
     const res = await ddb.send(new QueryCommand({
       TableName: TASK_TABLE,
@@ -426,7 +427,7 @@ async function findIterationReplyId(
       .map((item) => ({ taskId: item.task_id, replyId: item.channel_metadata?.iteration_reply_comment_id }))
       .filter((c): c is { taskId: string; replyId: string } =>
         typeof c.taskId === 'string' && typeof c.replyId === 'string' && c.replyId.length > 0);
-    if (candidates.length === 0) return null;
+    if (candidates.length === 0) return LOOKUP_ABSENT;
 
     // Prefer the task whose pushed head_sha matches this deploy's commit (correct
     // attribution under overlapping iterations). Walk newest-first; GetItem the
@@ -436,16 +437,16 @@ async function findIterationReplyId(
         const got = await ddb.send(new GetCommand({
           TableName: TASK_TABLE, Key: { task_id: c.taskId }, ProjectionExpression: 'head_sha',
         }));
-        if (got.Item?.head_sha === deploySha) return { replyId: c.replyId, taskId: c.taskId };
+        if (got.Item?.head_sha === deploySha) return lookupFound({ replyId: c.replyId, taskId: c.taskId });
       }
     }
     // No SHA match (pre-fix task / non-PR deploy) → newest reply-bearing task.
-    return { replyId: candidates[0].replyId, taskId: candidates[0].taskId };
+    return lookupFound({ replyId: candidates[0].replyId, taskId: candidates[0].taskId });
   } catch (err) {
     logger.warn('findIterationReplyId query failed (non-fatal)', {
       linear_issue_id: linearIssueId, error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return lookupFailed(err);
   }
 }
 

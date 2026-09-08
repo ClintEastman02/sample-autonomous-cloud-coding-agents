@@ -1331,7 +1331,15 @@ export function makeLinearCommand(): Command {
         // Best-effort: fetch team keys so the screenshot processor can
         // prefix-route Linear issue lookups (e.g. ENG-42 → the workspace
         // owning the ENG team) instead of scanning every active workspace.
-        const teamKeys = await queryLinearTeamKeys(`Bearer ${linearAccessToken}`);
+        const teamKeysResult = await queryLinearTeamKeys(`Bearer ${linearAccessToken}`);
+        if (!teamKeysResult.ok) {
+          console.log(
+            '  ⚠ Could not read this workspace\'s Linear team keys — recording the workspace '
+            + 'without them. Issue lookups will fall back to scanning every workspace; re-run '
+            + 'setup later to record team keys for faster prefix-routing.',
+          );
+        }
+        const teamKeys = teamKeysResult.ok ? teamKeysResult.keys : [];
         await ddb.send(new PutCommand({
           TableName: workspaceRegistryTable!,
           Item: {
@@ -1755,7 +1763,15 @@ export function makeLinearCommand(): Command {
 
         // ─── Persist registry + user-mapping rows ──────────────────────
         // Fetch team keys for prefix-routing (see same call in `setup`).
-        const teamKeys = await queryLinearTeamKeys(`Bearer ${tokenResponse.access_token}`);
+        const teamKeysResult = await queryLinearTeamKeys(`Bearer ${tokenResponse.access_token}`);
+        if (!teamKeysResult.ok) {
+          console.log(
+            '  ⚠ Could not read this workspace\'s Linear team keys — recording the workspace '
+            + 'without them. Issue lookups will fall back to scanning every workspace; re-run '
+            + 'add-workspace later to record team keys for faster prefix-routing.',
+          );
+        }
+        const teamKeys = teamKeysResult.ok ? teamKeysResult.keys : [];
         await ddb.send(new PutCommand({
           TableName: workspaceRegistryTable!,
           Item: {
@@ -2423,14 +2439,26 @@ interface LinearWorkspaceMember {
 }
 
 /**
+ * Outcome of a {@link queryLinearTeamKeys} call. An empty `keys` array is a
+ * legitimate success (a workspace with no teams), so the only distinction the
+ * two states carry is success-vs-failure — a network/auth/GraphQL break that
+ * used to collapse into the same empty array as "no teams" (#756 Cat 2). The
+ * caller warns on `ok: false` so prefix-routing degrading to a full-workspace
+ * scan is visible instead of silent.
+ */
+export type TeamKeysResult =
+  | { readonly ok: true; readonly keys: string[] }
+  | { readonly ok: false; readonly error: unknown };
+
+/**
  * Query the workspace's team keys (e.g. `["ABCA", "PLAT"]`). Persisted on
  * the registry row so the screenshot processor can prefix-route Linear
  * issue lookups to the owning workspace instead of scanning every
- * workspace's tokens. Returns an empty array on failure — callers persist
- * what they got and the lookup falls back to scanning if `team_keys` is
- * absent or stale.
+ * workspace's tokens. On failure the caller persists the row without
+ * `team_keys` and the lookup falls back to scanning — but the failure is
+ * surfaced (see {@link TeamKeysResult}) rather than swallowed as "no teams".
  */
-export async function queryLinearTeamKeys(authorizationHeader: string): Promise<string[]> {
+export async function queryLinearTeamKeys(authorizationHeader: string): Promise<TeamKeysResult> {
   try {
     const res = await fetch('https://api.linear.app/graphql', {
       method: 'POST',
@@ -2444,15 +2472,17 @@ export async function queryLinearTeamKeys(authorizationHeader: string): Promise<
         query: '{ teams(first: 100) { nodes { key } } }',
       }),
     });
-    if (!res.ok) return [];
+    if (!res.ok) {
+      return { ok: false, error: new Error(`Linear teams query returned HTTP ${res.status}`) };
+    }
     const body = await res.json() as { data?: { teams?: { nodes?: Array<{ key?: string }> } } };
     const keys = (body.data?.teams?.nodes ?? [])
       .map((t) => t.key)
       .filter((k): k is string => typeof k === 'string' && k.length > 0)
       .map((k) => k.toUpperCase());
-    return Array.from(new Set(keys)).sort();
-  } catch {
-    return [];
+    return { ok: true, keys: Array.from(new Set(keys)).sort() };
+  } catch (err) {
+    return { ok: false, error: err };
   }
 }
 
