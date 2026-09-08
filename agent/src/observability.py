@@ -81,8 +81,10 @@ def current_otel_trace_id() -> str | None:
         # up there, transform to that form (the timestamp is the first 8 hex chars).
         return trace.format_trace_id(ctx.trace_id)
     except Exception:
-        # nosemgrep: py-silent-success-masking -- trace id is a graceful-missing
-        # correlation field; a tracer fault must not fail the caller's write path.
+        # A tracer fault must not fail the caller's write path; the trace id is a
+        # graceful-missing correlation field. The nosemgrep token must sit on the
+        # line directly above the return (or on it) to bind — see the rule header.
+        # nosemgrep: py-silent-success-masking -- graceful-missing correlation field
         return None
 
 

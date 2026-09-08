@@ -13,6 +13,14 @@
 # on the flagged return line (repo convention; precedent in
 # scripts/check-types-sync.ts and agent/src/config.py).
 #
+# PLACEMENT FOOTGUN: `focus-metavariable: $RET` anchors the finding on the
+# `return` statement, so the `nosemgrep` TOKEN must sit on that return line or
+# the line IMMEDIATELY above it — that is the only span semgrep scans for a
+# suppression. A multi-line justification whose FIRST line carries the token
+# and whose continuation line then abuts the return does NOT bind (the abutting
+# line lacks the token). Put the prose above and the `# nosemgrep: ...` line
+# last, directly over the return.
+#
 # Known limitation: a `return null`/`return []` inside a callback *defined
 # within* a catch block (e.g. `.map(i => ... return null ...)`) is flagged
 # even though it does not mask the outer failure. Rare in practice; use the

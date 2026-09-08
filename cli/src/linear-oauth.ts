@@ -425,6 +425,7 @@ export async function readExistingWebhookSecret(
   try {
     raw = await fetchSecretString();
   } catch (err) {
+    // nosemgrep: ts-silent-success-masking -- "no such secret" IS the empty success here: a first install has no bundle, so there is nothing to preserve. Every other error rethrows below, which is the fail-closed half of the #611 contract this function exists for.
     if (isNotFound(err)) return undefined; // genuine first install
     throw err; // fail closed — caller wraps with an actionable CliError
   }
