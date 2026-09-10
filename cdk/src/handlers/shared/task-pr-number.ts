@@ -31,6 +31,12 @@ import { type LookupResult, LOOKUP_ABSENT, lookupFailed, lookupFound } from './l
  * ``null`` (#756 Cat 2). Returns a {@link LookupResult} so callers can tell
  * "dependent has no PR yet" (absent) from "the TaskRecord read broke" (error):
  * the restack cascade must not misreport an outage as "no PR — skipping".
+ *
+ * This helper deliberately does NOT log the failure itself: the cause travels in
+ * the result, and every caller holds orchestration/task context worth logging
+ * alongside it (all four current callers do). That makes logging a **caller
+ * obligation** — a caller that neither logs the failure nor branches on
+ * ``isLookupFailure`` re-creates the silent drop this extraction removed.
  */
 export async function readTaskPrNumber(
   ddb: DynamoDBDocumentClient,

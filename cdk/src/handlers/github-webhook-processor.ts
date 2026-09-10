@@ -408,13 +408,26 @@ export async function handler(event: ProcessorEvent): Promise<void> {
  * in place), so we GetItem ``head_sha`` per reply-bearing candidate (bounded by
  * iterations-per-issue, newest-first so the common single-iteration case is one
  * read). Falls back to the newest reply-bearing task when no head_sha matches
- * (pre-fix tasks that never stored it, or a non-PR deploy). Null when none.
+ * (pre-fix tasks that never stored it, or a non-PR deploy).
+ *
+ * Returns a {@link LookupResult}: ``found`` with the reply + task ids, ``absent``
+ * when the query ran and this issue has no reply-bearing iteration, and a failure
+ * when the lookup could not run or broke (unconfigured table, Query error) — so a
+ * caller is never told "no iteration reply" because the read failed.
  */
 async function findIterationReplyId(
   linearIssueId: string,
   deploySha?: string,
 ): Promise<LookupResult<{ replyId: string; taskId: string }>> {
-  if (!TASK_TABLE) return LOOKUP_ABSENT;
+  // Misconfiguration, not absence: the query never ran, so we cannot claim there
+  // is genuinely no iteration reply. Behaviourally identical to LOOKUP_ABSENT for
+  // today's sole (best-effort) caller, but reporting it as absent is exactly the
+  // conflation LookupResult exists to end — and it would mislead the next caller
+  // that branches on the difference.
+  if (!TASK_TABLE) {
+    logger.warn('findIterationReplyId: TASK_TABLE_NAME is not configured — cannot look up the iteration reply');
+    return lookupFailed(new Error('TASK_TABLE_NAME is not configured'));
+  }
   try {
     const res = await ddb.send(new QueryCommand({
       TableName: TASK_TABLE,

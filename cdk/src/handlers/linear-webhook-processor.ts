@@ -1935,12 +1935,25 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
   if (isLookupFailure(parentResult)) {
     // The parent lookup broke (Linear outage / GraphQL error). Do NOT fall
     // through to the standalone path — that would silently downgrade an
-    // orchestration child. Defer; a stream replay re-drives once Linear recovers.
-    logger.warn('Comment trigger: issue-parent lookup failed — deferring (not downgrading to standalone)', {
+    // orchestration child (no dependency cascade) on a transient error.
+    //
+    // THROW rather than return: this processor is async-invoked
+    // (`InvocationType: 'Event'` in linear-webhook.ts), so a plain `return` is a
+    // SUCCESSFUL invocation — Lambda discards the event and the comment is
+    // dropped permanently and invisibly. Only a thrown error spends the
+    // async-invoke retry budget. And the processor's retries are the ONLY replay
+    // available: the receiver already wrote the dedup row (8h TTL) and 200'd
+    // Linear, and it rolls that row back only on *invoke* failure — so Linear's
+    // own redelivery is deduped away, and no reconciler re-drives webhook
+    // deliveries. Nothing user-visible has been posted on this path yet (the 👀
+    // is posted downstream), and everything above is a read, so a retry is safe.
+    logger.warn('Comment trigger: issue-parent lookup failed — retrying the delivery (not downgrading to standalone)', {
       issue_id: commentedIssueId,
       error: parentResult.error instanceof Error ? parentResult.error.message : String(parentResult.error),
     });
-    return;
+    throw parentResult.error instanceof Error
+      ? parentResult.error
+      : new Error(`Linear issue-parent lookup failed: ${String(parentResult.error)}`);
   }
   const parentId = lookupValueOr(parentResult, null);
   const orchestrationId = parentId ? deriveOrchestrationId(parentId) : null;
@@ -2099,13 +2112,28 @@ async function handleParentEpicCommentTrigger(args: {
   const prNumberResult = await readTaskPrNumber(ddb, process.env.TASK_TABLE_NAME!, target.child_task_id);
   if (isLookupFailure(prNumberResult)) {
     // The read broke — don't tell the user "no PR yet" (a distinct, misleading
-    // state). Leave the 👀 in place so a stream replay can re-drive it.
-    logger.warn('Comment trigger (parent epic): sub-issue PR read failed — deferring', {
+    // state), and don't iterate on a PR number we couldn't read.
+    //
+    // ANSWER rather than retry. Unlike the issue-parent site above, this path has
+    // already won the one-time ack claim and posted the 👀, and `claimCommentAck`
+    // is never released — so throwing to spend the async-invoke retry budget
+    // would land on `!won` and no-op, leaving a permanent 👀 with no reply. The
+    // only durable outcome here is a visible one: say what happened and flip
+    // 👀 → ❓ so the comment doesn't read as still-in-progress, exactly as the
+    // "no PR yet" branch below does.
+    logger.warn('Comment trigger (parent epic): sub-issue PR read failed — asked the user to re-comment', {
       orchestration_id: orchestrationId,
       sub_issue_id: target.sub_issue_id,
       child_task_id: target.child_task_id,
       error: prNumberResult.error instanceof Error ? prNumberResult.error.message : String(prNumberResult.error),
     });
+    await channel.postThreadedReply?.(
+      parentRef, { commentId: replyTargetId },
+      `⚠️ I couldn't read **${nodeDisplayId(target) ?? target.sub_issue_id}**'s pull request just now `
+        + '(a transient error reading its task record), so I stopped rather than guess. Nothing was '
+        + 'started. Please comment again to retry.',
+    );
+    await channel.replaceCommentReaction?.({ commentId }, parentRef, 'needs_input');
     return;
   }
   if (!prNumberResult.ok) {

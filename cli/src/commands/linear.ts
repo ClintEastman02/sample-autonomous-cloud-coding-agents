@@ -2445,6 +2445,12 @@ interface LinearWorkspaceMember {
  * used to collapse into the same empty array as "no teams" (#756 Cat 2). The
  * caller warns on `ok: false` so prefix-routing degrading to a full-workspace
  * scan is visible instead of silent.
+ *
+ * This is the CLI-local twin of the handlers' `LookupResult<T>`
+ * (`cdk/src/handlers/shared/lookup-result.ts`) — same intent, but with no
+ * `absent` state (an empty team list is a genuine success here, not an absence)
+ * and a named `keys` field. The package boundary rules out literal reuse; keep
+ * the two conceptually aligned if either grows a state.
  */
 export type TeamKeysResult =
   | { readonly ok: true; readonly keys: string[] }
@@ -2457,6 +2463,18 @@ export type TeamKeysResult =
  * workspace's tokens. On failure the caller persists the row without
  * `team_keys` and the lookup falls back to scanning — but the failure is
  * surfaced (see {@link TeamKeysResult}) rather than swallowed as "no teams".
+ *
+ * Every error layer is a failure, not an empty list. In particular Linear's
+ * GraphQL API answers auth/scope/validation problems with **HTTP 200 and an
+ * `errors` array** — a token minted without `read` team scope returns
+ * `200 {"errors":[{"message":"Authentication required"}]}`, whose `data` is
+ * absent. Reading `data.teams.nodes ?? []` off that body is precisely the
+ * "can't tell 'no teams' from 'auth failed'" masking this conversion exists to
+ * remove, so `errors` is checked first and a missing `teams` connection is
+ * treated as a malformed body: a real workspace always returns the connection,
+ * empty (`{ nodes: [] }`) when it has no teams. Same layering as the sibling
+ * readers in `cdk/src/handlers/shared/linear-feedback.ts` and
+ * `linear-subissue-fetch.ts`.
  */
 export async function queryLinearTeamKeys(authorizationHeader: string): Promise<TeamKeysResult> {
   try {
@@ -2475,8 +2493,18 @@ export async function queryLinearTeamKeys(authorizationHeader: string): Promise<
     if (!res.ok) {
       return { ok: false, error: new Error(`Linear teams query returned HTTP ${res.status}`) };
     }
-    const body = await res.json() as { data?: { teams?: { nodes?: Array<{ key?: string }> } } };
-    const keys = (body.data?.teams?.nodes ?? [])
+    const body = await res.json() as {
+      data?: { teams?: { nodes?: Array<{ key?: string }> } };
+      errors?: unknown;
+    };
+    if (body.errors) {
+      return { ok: false, error: body.errors };
+    }
+    const teams = body.data?.teams;
+    if (!teams) {
+      return { ok: false, error: new Error('Linear teams query returned no `teams` connection') };
+    }
+    const keys = (teams.nodes ?? [])
       .map((t) => t.key)
       .filter((k): k is string => typeof k === 'string' && k.length > 0)
       .map((k) => k.toUpperCase());

@@ -124,7 +124,7 @@ process.env.TASK_TABLE_NAME = 'TaskTable';
 process.env.ORCHESTRATION_TABLE_NAME = 'OrchestrationTable';
 
 import { handler } from '../../src/handlers/linear-webhook-processor';
-import { LOOKUP_ABSENT, lookupFound } from '../../src/handlers/shared/lookup-result';
+import { LOOKUP_ABSENT, lookupFailed, lookupFound } from '../../src/handlers/shared/lookup-result';
 
 function eventWith(payload: Record<string, unknown>): { raw_body: string } {
   return { raw_body: JSON.stringify(payload) };
@@ -958,6 +958,41 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 
+  // The two behaviour changes the LookupResult conversion actually makes: a
+  // *failed* issue-parent lookup must not be treated like "this issue has no
+  // parent". These two tests pin the difference — same standalone fallback
+  // available in both, opposite outcomes.
+  test('an ABSENT parent (genuinely top-level) still falls through to the standalone path', async () => {
+    fetchIssueParentIdMock.mockResolvedValue(LOOKUP_ABSENT);
+    mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', pr_number: 99 });
+
+    await handler(eventWith(comment()));
+
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    expect(createTaskCoreMock.mock.calls[0][0].pr_number).toBe(99);
+  });
+
+  test('a FAILED parent lookup THROWS to earn a retry — no silent downgrade to standalone', async () => {
+    // Two regressions in one. (1) Falling through would iterate this issue's PR
+    // via the standalone path — no dependency cascade — on nothing worse than a
+    // Linear 503, silently downgrading an orchestration child. (2) Returning
+    // instead of throwing would be a *successful* async invocation: Lambda
+    // discards the event, the receiver's dedup row (8h TTL) already suppressed
+    // Linear's own redelivery, and the @bgagent comment is dropped with no 👀,
+    // no reply, and no retry. Only a throw spends the async-invoke retry budget,
+    // and nothing user-visible has been posted at this point, so a retry is safe.
+    const err = new Error('Linear issue-parent fetch returned HTTP 503');
+    fetchIssueParentIdMock.mockResolvedValue(lookupFailed(err));
+    // A standalone task IS resolvable — so "no task created" can only mean the
+    // fall-through was refused, not that there was nothing to fall through to.
+    mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', pr_number: 99 });
+    fetchIssueParentIdMock.mockResolvedValue(lookupFailed(err)); // mockStandaloneOnly resets it to ABSENT
+
+    await expect(handler(eventWith(comment()))).rejects.toThrow(err);
+
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+  });
+
   test('@bgagent on an un-started sub-issue (no child_task_id) AND no ABCA task → no task', async () => {
     mockOrchWithChild({ subIssueId: 'sub-issue-1' }); // no childTaskId, no standalone
     await handler(eventWith(comment()));
@@ -1346,6 +1381,38 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       expect(replyToCommentMock).toHaveBeenCalledTimes(1);
       // 👀 → ❓ once we know we're only asking, not working.
       expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'pc-1', 'question');
+    });
+
+    test('a FAILED sub-issue PR read ANSWERS the user and flips 👀 → ❓ (never a permanent 👀)', async () => {
+      // The counterpart to the issue-parent site, which throws to earn a retry.
+      // Here the one-time ack claim is already won and the 👀 already posted, and
+      // `claimCommentAck` is never released — so a throw would be re-driven into
+      // the `!won` no-op branch, leaving the comment marked "being worked on"
+      // forever with no reply. The only durable outcome is a visible one.
+      mockParentEpic('PARENT-EPIC');
+      const epicImpl = ddbSend.getMockImplementation()!;
+      ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+        const key = cmd.input.Key as { task_id?: string } | undefined;
+        if (cmd._type === 'Get' && key?.task_id === 'task-footer') {
+          throw new Error('ProvisionedThroughputExceededException');
+        }
+        return epicImpl(cmd);
+      });
+
+      await handler(eventWith(parentComment('@bgagent for the footer change the tagline', 'pc-prfail')));
+
+      // Did not iterate on a PR number it could not read, and did not throw.
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      // Answered on the epic, threaded under the triggering comment.
+      expect(replyToCommentMock).toHaveBeenCalledTimes(1);
+      const [, issueId, , replyBody] = replyToCommentMock.mock.calls[0];
+      expect(issueId).toBe('PARENT-EPIC');
+      expect(String(replyBody)).toMatch(/couldn't read/i);
+      expect(String(replyBody)).toMatch(/comment again/i);
+      // Must NOT report the distinct, misleading "no PR yet" state.
+      expect(String(replyBody)).not.toMatch(/nothing to iterate/i);
+      // 👀 → ❓, so the comment does not read as still-in-progress.
+      expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'pc-prfail', 'question');
     });
 
     test('webhook REDELIVERY of the same parent comment posts EXACTLY ONE reply (no spam)', async () => {

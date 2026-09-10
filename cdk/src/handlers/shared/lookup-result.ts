@@ -43,7 +43,14 @@ export type LookupResult<T> =
 /** The lookup ran and found `value`. */
 export const lookupFound = <T>(value: T): LookupResult<T> => ({ ok: true, value });
 
-/** The lookup ran and there is genuinely nothing to find (not an error). */
+/**
+ * The lookup ran and there is genuinely nothing to find (not an error).
+ *
+ * Reserve this for an answered query with an empty answer. A precondition that
+ * never let the query run — an unset env var, a missing table name — is a
+ * failure: use {@link lookupFailed}. Conflating the two is the masking this
+ * type exists to end, even where the two branches happen to behave alike today.
+ */
 export const LOOKUP_ABSENT = { ok: false, absent: true } as const;
 
 /** The lookup itself failed — carries the cause for logging/escalation. */
@@ -53,6 +60,21 @@ export const lookupFailed = (error: unknown): LookupResult<never> => ({ ok: fals
 export const isLookupFailure = <T>(
   r: LookupResult<T>,
 ): r is { readonly ok: false; readonly error: unknown } => !r.ok && 'error' in r;
+
+/**
+ * True only for the genuine-absence variant (not the failure variant).
+ *
+ * The companion to {@link isLookupFailure}, so "genuinely nothing" can be named
+ * at a call site rather than inferred from a bare `!r.ok` — which also catches
+ * failure — or from an inlined `!('error' in r)`. The two `ok: false` variants
+ * share their tag, so the union is not single-tag discriminated and `switch`
+ * exhaustiveness is unavailable; these two guards are the intended narrowing.
+ * A state added to the union later MUST get a guard here, or it silently falls
+ * into whichever `!r.ok` branch each caller happens to have written.
+ */
+export const isLookupAbsent = <T>(
+  r: LookupResult<T>,
+): r is { readonly ok: false; readonly absent: true } => !r.ok && !('error' in r);
 
 /**
  * Collapse to the found value, or `fallback` when absent OR failed. For purely
