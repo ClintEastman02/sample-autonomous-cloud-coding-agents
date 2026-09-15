@@ -18,6 +18,21 @@ import { readFileSync } from 'node:fs';
 const TOKEN = /nosemgrep:[^\n]*\bsilent-success-masking\b/;
 // The rule anchors on a return; re-throwing (`raise`/`throw`) is the ok path but
 // is accepted here too so the guard never fights a legitimate placement.
+//
+// KNOWN LIMITATION (deliberate): this matches the bare word anywhere on the line,
+// including inside a comment or a string literal. So a token whose next line only
+// *mentions* `return`/`raise`/`throw` in prose — `// we return early below` — is
+// accepted even though the real anchor sits further down and the suppression does
+// not bind. That is a false negative for THIS guard, never a false positive: it
+// can wave through a mis-placed token, but it cannot flag a correct one.
+//
+// Left as-is on purpose. This check is belt-and-suspenders over `semgrep test
+// .semgrep/`, which is the actual correctness gate — the scan itself reports the
+// finding when a suppression fails to bind, so the failure mode here is "the
+// friendly early warning stayed quiet", not "a mask shipped undetected".
+// Tightening it (strip comments/strings before testing) trades that simplicity
+// for a language-aware parser in a defensive lint. Revisit if a real mis-binding
+// ever slips past.
 const ANCHOR = /\b(return|raise|throw)\b/;
 const SOURCE_EXT = /\.(ts|tsx|js|mjs|cjs|py)$/;
 
