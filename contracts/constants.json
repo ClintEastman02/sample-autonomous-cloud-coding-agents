@@ -82,5 +82,18 @@
       "actor": "app",
       "prompt": "consent"
     }
+  },
+  "git_providers": {
+    "vocabulary": [
+      "github",
+      "gitlab",
+      "bitbucket",
+      "codecommit",
+      "generic_git"
+    ],
+    "implemented": [
+      "github"
+    ],
+    "default": "github"
   }
 }

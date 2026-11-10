@@ -391,6 +391,16 @@ describe('parseRepoConfigRow', () => {
     expect(row.status).toBe('active');
   });
 
+  test('keeps a stored git_provider verbatim', () => {
+    const row = parseRepoConfigRow({ repo: 'acme/a', status: 'active', git_provider: 'gitlab' });
+    expect(row.git_provider).toBe('gitlab');
+  });
+
+  test('leaves git_provider absent when the row has none', () => {
+    const row = parseRepoConfigRow({ repo: 'acme/a', status: 'active' });
+    expect(row).not.toHaveProperty('git_provider');
+  });
+
   test('throws on a non-string repo', () => {
     expect(() => parseRepoConfigRow({ status: 'active' })).toThrow(CliError);
   });

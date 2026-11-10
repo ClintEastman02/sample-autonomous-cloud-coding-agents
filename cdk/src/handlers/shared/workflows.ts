@@ -69,6 +69,14 @@ export interface WorkflowDescriptor {
    * silent downgrade). Keep in lockstep with the YAML's `agent_config.model.id`.
    */
   readonly modelId?: string;
+  /**
+   * The workflow's declared `repo_config.provider` (ADR-014 vocabulary), if any.
+   * A CONSTRAINT, never a source (ADR-025 §1): the repo row's `git_provider` is the
+   * only authority, and the orchestrator rejects a task whose resolved repo provider
+   * differs from this. `undefined` ⇒ the workflow accepts any provider. Keep in
+   * lockstep with the YAML's `repo_config.provider` (parity test).
+   */
+  readonly provider?: string;
 }
 
 /**
@@ -116,6 +124,7 @@ const DESCRIPTORS: Record<string, WorkflowDescriptor> = {
     requiresRepo: true,
     readOnly: false,
     requiredInputs: { oneOf: ['issue_number', 'task_description'] },
+    provider: 'github',
   },
   'coding/pr-iteration-v1': {
     id: 'coding/pr-iteration-v1',
@@ -123,6 +132,7 @@ const DESCRIPTORS: Record<string, WorkflowDescriptor> = {
     requiresRepo: true,
     readOnly: false,
     requiredInputs: { allOf: ['pr_number'] },
+    provider: 'github',
   },
   'coding/pr-review-v1': {
     id: 'coding/pr-review-v1',
@@ -130,6 +140,7 @@ const DESCRIPTORS: Record<string, WorkflowDescriptor> = {
     requiresRepo: true,
     readOnly: true,
     requiredInputs: { allOf: ['pr_number'] },
+    provider: 'github',
   },
   // Re-stack: re-merge a changed predecessor branch into an existing stacked
   // child PR. Writeable, repo-bound, and operates on an existing PR
@@ -140,6 +151,7 @@ const DESCRIPTORS: Record<string, WorkflowDescriptor> = {
     requiresRepo: true,
     readOnly: false,
     requiredInputs: { allOf: ['pr_number'] },
+    provider: 'github',
   },
   'default/agent-v1': {
     id: 'default/agent-v1',
@@ -273,6 +285,18 @@ export function resolveWorkflowRefError(ref?: string | null): WorkflowResolution
 /** Look up a descriptor by resolved id (after {@link resolveWorkflowRef}). */
 export function getWorkflowDescriptor(id: string): WorkflowDescriptor | undefined {
   return DESCRIPTORS[id];
+}
+
+/**
+ * ADR-025 §1/§9: a workflow's `repo_config.provider` constrains the repo's resolved
+ * git provider. Returns the rejection message when the workflow declares a provider
+ * that differs from `repoProvider`, else `null` (no declared provider, an unknown id,
+ * or a match).
+ */
+export function workflowProviderMismatch(id: string, repoProvider: string): string | null {
+  const required = DESCRIPTORS[id]?.provider;
+  if (required === undefined || required === repoProvider) return null;
+  return `workflow requires git_provider '${required}', repo is '${repoProvider}'`;
 }
 
 /** Whether the resolved workflow clones a repo (drives preflight gating). */

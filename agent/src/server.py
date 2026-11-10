@@ -417,6 +417,7 @@ def _run_task_background(
     workload_access_token: str = "",
     attachments: list[dict] | None = None,
     resolved_assets: list[dict] | None = None,
+    git_provider: object | None = None,
 ) -> None:
     """Run the agent task in a background thread."""
     global _background_pipeline_failed
@@ -507,6 +508,7 @@ def _run_task_background(
             user_id=user_id,
             attachments=attachments,
             resolved_assets=resolved_assets,
+            git_provider=git_provider,
         )
         _background_pipeline_failed = False
     except Exception as e:
@@ -607,6 +609,14 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
     channel_source = inp.get("channel_source", "") or ""
     channel_metadata = inp.get("channel_metadata") or {}
     attachments = inp.get("attachments") or []
+    # ADR-025 §1: passed through RAW — no coercion, no default. ``build_config``
+    # resolves it (absent/None → github) and fails closed on anything else, so a
+    # malformed value must reach it unchanged rather than be "fixed" here.
+    # NOTE: ``github_token`` above is resolved BEFORE the provider is, so on this
+    # path (AgentCore, MicroVM /run) the platform GitHub secret is read even for
+    # an unsupported provider; the task still fails in build_config before clone.
+    # TODO(ADR-025 Phase 2 §4): resolve the SCM token after the provider is resolved.
+    git_provider = inp.get("git_provider")
     # ``trace`` is strictly opt-in (design §10.1). Accept only real
     # booleans from the orchestrator — a string "false" would otherwise
     # flip the flag on.
@@ -685,6 +695,7 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
         "user_id": user_id,
         "workload_access_token": workload_access_token,
         "attachments": attachments,
+        "git_provider": git_provider,
     }
 
 

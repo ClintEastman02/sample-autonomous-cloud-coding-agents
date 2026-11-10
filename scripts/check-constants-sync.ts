@@ -49,7 +49,8 @@ const POLICY_PY = path.join(REPO_ROOT, 'agent/src/policy.py');
 const JIRA_REACTIONS_PY = path.join(REPO_ROOT, 'agent/src/jira_reactions.py');
 const SERVER_PY = path.join(REPO_ROOT, 'agent/src/server.py');
 const CONFIG_PY = path.join(REPO_ROOT, 'agent/src/config.py');
-const PYTHON_CONSUMERS = [POLICY_PY, JIRA_REACTIONS_PY, SERVER_PY, CONFIG_PY];
+const GIT_PROVIDER_PY = path.join(REPO_ROOT, 'agent/src/git_provider/__init__.py');
+const PYTHON_CONSUMERS = [POLICY_PY, JIRA_REACTIONS_PY, SERVER_PY, CONFIG_PY, GIT_PROVIDER_PY];
 const MICROVM_COMPUTE_TS = path.join(REPO_ROOT, 'cdk/src/constructs/lambda-microvm-compute.ts');
 const TS_CONSUMERS = [MICROVM_COMPUTE_TS];
 
@@ -118,6 +119,20 @@ const OWNED_PYTHON_PATTERNS: ReadonlyArray<{ name: string; regex: RegExp }> = [
     name: '_READY_WARMUP_REQUIRED_TIMEOUT_SECONDS',
     regex: /^\s*_READY_WARMUP_REQUIRED_TIMEOUT_SECONDS\s*(?::\s*(?:int|float))?\s*=\s*-?\d+\b/m,
   },
+  // ADR-025 §1: the implemented git-provider list is what the agent fails
+  // closed against, so a literal copy would let the agent and the orchestrator
+  // disagree about which providers are accepted. A contract-sourced
+  // `= frozenset(_GIT_PROVIDERS_CONTRACT["implemented"])` does not match.
+  {
+    name: 'IMPLEMENTED_GIT_PROVIDERS',
+    regex: /^\s*IMPLEMENTED_GIT_PROVIDERS\s*(?::[^=]+)?=\s*(?:frozenset\(|set\(|tuple\(|list\()?\s*[[{(]/m,
+  },
+  {
+    name: 'GIT_PROVIDER_VOCABULARY',
+    regex: /^\s*GIT_PROVIDER_VOCABULARY\s*(?::[^=]+)?=\s*(?:frozenset\(|set\(|tuple\(|list\()?\s*[[{(]/m,
+  },
+  // Any annotation (`: str`, `: VcsProvider`), since the agent types it as the Literal.
+  { name: 'DEFAULT_GIT_PROVIDER', regex: /^\s*DEFAULT_GIT_PROVIDER\s*(?::[^=]+)?=\s*["']/m },
 ];
 
 /**
@@ -184,6 +199,11 @@ function main(): number {
       ready_hook_timeout_seconds: number;
       warmup_total_budget_seconds: number;
       warmup_required_timeout_seconds: number;
+    };
+    git_providers?: {
+      vocabulary: string[];
+      implemented: string[];
+      default: string;
     };
   };
   try {
@@ -354,6 +374,37 @@ function main(): number {
       'warmup_total_budget_seconds (the required warm-up must leave the ' +
       'best-effort ones something to share)',
     );
+  }
+
+  // ADR-025 §1: `implemented` is the fail-closed allowlist on both the
+  // orchestrator and the agent, so it must sit inside the ADR-014 vocabulary and
+  // the default must be implemented (an absent row/payload value resolves to it).
+  const gp = json.git_providers;
+  if (
+    !gp
+    || !Array.isArray(gp.vocabulary)
+    || !Array.isArray(gp.implemented)
+    || typeof gp.default !== 'string'
+  ) {
+    console.error(`${CONSTANTS_JSON} is missing git_providers.{vocabulary,implemented,default}`);
+    return 1;
+  }
+  if (gp.implemented.length === 0) {
+    invariantErrors.push('git_providers.implemented must not be empty');
+  }
+  for (const id of gp.implemented) {
+    if (!gp.vocabulary.includes(id)) {
+      invariantErrors.push(`git_providers.implemented names "${id}", absent from vocabulary`);
+    }
+  }
+  if (new Set(gp.implemented).size !== gp.implemented.length) {
+    invariantErrors.push('git_providers.implemented contains a duplicate');
+  }
+  if (new Set(gp.vocabulary).size !== gp.vocabulary.length) {
+    invariantErrors.push('git_providers.vocabulary contains a duplicate');
+  }
+  if (!gp.implemented.includes(gp.default)) {
+    invariantErrors.push(`git_providers.default "${gp.default}" must be one of implemented`);
   }
 
   if (invariantErrors.length > 0) {

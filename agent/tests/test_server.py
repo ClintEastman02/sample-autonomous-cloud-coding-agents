@@ -1556,6 +1556,82 @@ class TestMicrovmRunHookS3Payload:
             assert server._active_threads == []
 
 
+class TestMicrovmRunHookGitProvider:
+    """ADR-025 Phase 1a R6: ``git_provider`` survives the MicroVM ``/run`` unwrap.
+
+    Drives the real route (envelope parse → extract → spawn) and stops at
+    ``_run_task_background``, which ``_spawn_background`` looks up by module
+    global at call time. The value must arrive RAW: ``build_config`` owns
+    validation, so an unsupported id is forwarded, not dropped or "fixed".
+    """
+
+    def _capture(self, client, monkeypatch, envelope: dict) -> dict:
+        seen: dict = {}
+        started = threading.Event()
+
+        def fake_background(**kwargs):
+            seen.update(kwargs)
+            started.set()
+
+        monkeypatch.setattr(server, "_run_task_background", fake_background)
+        # The envelope carries no github_token; keep the extractor off Secrets Manager.
+        monkeypatch.setattr(server, "resolve_github_token", lambda: "ghp_test")
+
+        r = client.post(RUN_HOOK, json=_run_hook_body(envelope))
+        assert r.status_code == 200, r.text
+        assert started.wait(timeout=5.0)
+        return seen
+
+    @pytest.mark.parametrize("value", ["github", "gitlab"])
+    def test_inline_envelope_forwards_git_provider(
+        self, client, monkeypatch, baked_platform_env, value
+    ):
+        seen = self._capture(
+            client,
+            monkeypatch,
+            {
+                "agent_payload": {
+                    "task_id": "t-gp-inline",
+                    "repo_url": "o/r",
+                    "prompt": "x",
+                    "git_provider": value,
+                }
+            },
+        )
+        assert seen["git_provider"] == value
+
+    def test_inline_envelope_without_key_forwards_none(
+        self, client, monkeypatch, baked_platform_env
+    ):
+        seen = self._capture(
+            client,
+            monkeypatch,
+            {"agent_payload": {"task_id": "t-gp-absent", "repo_url": "o/r", "prompt": "x"}},
+        )
+        assert seen["git_provider"] is None
+
+    @pytest.mark.parametrize("value", ["github", "gitlab"])
+    def test_s3_pointer_envelope_forwards_git_provider(
+        self, client, monkeypatch, baked_platform_env, value
+    ):
+        monkeypatch.setattr(
+            server,
+            "_fetch_microvm_payload_from_s3",
+            lambda _uri: {
+                "task_id": "t-gp-s3",
+                "repo_url": "o/r",
+                "prompt": "x",
+                "git_provider": value,
+            },
+        )
+        seen = self._capture(
+            client,
+            monkeypatch,
+            {"agent_payload_s3_uri": "s3://payload-bucket/t-gp-s3/payload.json"},
+        )
+        assert seen["git_provider"] == value
+
+
 class TestMicrovmRunHookRejections:
     """Every shape the agent cannot act on must fail LOUDLY, before spawning.
 

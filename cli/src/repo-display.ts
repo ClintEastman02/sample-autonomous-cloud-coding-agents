@@ -23,6 +23,7 @@ import {
   type ComputeDeployment,
   type ComputeDeploymentStatus,
 } from './compute-substrate';
+import { DEFAULT_GIT_PROVIDER, isImplementedGitProvider } from './git-provider';
 import type { GithubTokenSecretSource } from './github-token';
 import { redactSecretArn } from './operator-context';
 import { RepoConfigRow } from './repo-lookup';
@@ -70,10 +71,17 @@ export interface RepoConfigDisplay {
   readonly compute_deployment: ComputeDeploymentStatus;
   readonly compute_available: boolean;
   readonly configuration_error?: string;
+  /** False when the row stores a git_provider (including '' or null) that is not implemented. */
+  readonly git_provider_supported: boolean;
   /** Raw RepoTable values (absent when the Blueprint did not override). */
   readonly blueprint_overrides: Record<string, unknown>;
   /** Resolved configuration; dispatch requires compute_available to be true. */
   readonly effective: {
+    /**
+     * Stored RepoTable value shown raw (a DynamoDB NULL stays ``null``); platform
+     * default when absent (ADR-025 §1).
+     */
+    readonly git_provider: string | null;
     readonly compute_type: string;
     readonly runtime_arn?: string;
     readonly model_id: string;
@@ -112,6 +120,11 @@ export function formatRepoConfigForDisplay(
     fieldSources[key] = overridden ? 'blueprint' : 'platform';
   };
 
+  // Any stored attribute counts as an override — including '' and a DynamoDB
+  // NULL — so field source, overrides and display all agree on the raw value.
+  const storedGitProvider = config.git_provider as string | null | undefined;
+  const hasStoredGitProvider = storedGitProvider !== undefined;
+  mark('git_provider', hasStoredGitProvider);
   mark('compute_type', config.compute_type !== undefined);
   mark('runtime_arn', config.runtime_arn !== undefined);
   mark('model_id', config.model_id !== undefined);
@@ -137,6 +150,7 @@ export function formatRepoConfigForDisplay(
         : value;
     }
   }
+  if (hasStoredGitProvider) blueprintOverrides.git_provider = storedGitProvider;
 
   const compute = resolveRepositoryCompute(platform.deployment, config.compute_type);
   return {
@@ -147,8 +161,10 @@ export function formatRepoConfigForDisplay(
     compute_deployment: describeComputeDeployment(platform.deployment),
     compute_available: compute.compute_available,
     configuration_error: compute.configuration_error,
+    git_provider_supported: !hasStoredGitProvider || isImplementedGitProvider(storedGitProvider),
     blueprint_overrides: blueprintOverrides,
     effective: {
+      git_provider: hasStoredGitProvider ? storedGitProvider : DEFAULT_GIT_PROVIDER,
       compute_type: compute.compute_type,
       runtime_arn: compute.compute_available && compute.compute_type === 'agentcore'
         ? config.runtime_arn ?? platform.runtimeArn ?? undefined : undefined,
@@ -175,6 +191,11 @@ function formatSourcedValue(value: string, source: FieldSource): string {
   return `(platform default) ${value}`;
 }
 
+/** Quote strings so '' (and stray whitespace) stay visible; null renders bare. */
+function quoteRawValue(value: unknown): string {
+  return typeof value === 'string' ? `'${value}'` : String(value);
+}
+
 /** Text lines for ``repo show`` — omits unset optional customization fields. */
 export function buildRepoShowLines(display: RepoConfigDisplay): RepoShowLine[] {
   const lines: RepoShowLine[] = [
@@ -184,6 +205,12 @@ export function buildRepoShowLines(display: RepoConfigDisplay): RepoShowLine[] {
     {
       key: 'deployed_compute_types',
       text: display.compute_deployment.compute_types?.join(', ') ?? '(legacy additive deployment)',
+    },
+    {
+      key: 'git_provider',
+      text: display.git_provider_supported
+        ? formatSourcedValue(String(display.effective.git_provider), display.field_sources.git_provider)
+        : `UNSUPPORTED — ${formatSourcedValue(quoteRawValue(display.effective.git_provider), display.field_sources.git_provider)}`,
     },
     {
       key: 'compute_type',

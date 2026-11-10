@@ -124,6 +124,59 @@ describe('formatRepoConfigForDisplay', () => {
   });
 });
 
+describe('git_provider display (ADR-025 §1)', () => {
+  test('absent git_provider resolves to the platform default and is not an override', () => {
+    const display = formatRepoConfigForDisplay({ repo: 'acme/foo', status: 'active' }, PLATFORM);
+
+    expect(display.effective.git_provider).toBe('github');
+    expect(display.field_sources.git_provider).toBe('platform');
+    expect(display.blueprint_overrides).not.toHaveProperty('git_provider');
+    expect(buildRepoShowLines(display).find(l => l.key === 'git_provider')?.text)
+      .toBe('(platform default) github');
+  });
+
+  test('stored git_provider is shown raw as a per-blueprint override', () => {
+    const display = formatRepoConfigForDisplay(
+      { repo: 'acme/foo', status: 'active', git_provider: 'github' },
+      PLATFORM,
+    );
+
+    expect(display.effective.git_provider).toBe('github');
+    expect(display.field_sources.git_provider).toBe('blueprint');
+    expect(display.blueprint_overrides.git_provider).toBe('github');
+    expect(buildRepoShowLines(display).find(l => l.key === 'git_provider')?.text)
+      .toBe('github (per-blueprint override)');
+  });
+
+  test('a supported stored value is marked supported', () => {
+    const display = formatRepoConfigForDisplay(
+      { repo: 'acme/foo', status: 'active', git_provider: 'github' },
+      PLATFORM,
+    );
+    expect(display.git_provider_supported).toBe(true);
+    expect(formatRepoConfigForDisplay({ repo: 'acme/foo', status: 'active' }, PLATFORM)
+      .git_provider_supported).toBe(true);
+  });
+
+  test.each<[string, unknown, string]>([
+    ['gitlab', 'gitlab', "UNSUPPORTED — 'gitlab' (per-blueprint override)"],
+    ['case-variant GitLab', 'GitLab', "UNSUPPORTED — 'GitLab' (per-blueprint override)"],
+    ['empty string', '', "UNSUPPORTED — '' (per-blueprint override)"],
+    ['DynamoDB NULL', null, 'UNSUPPORTED — null (per-blueprint override)'],
+  ])('an unimplemented stored value (%s) is flagged UNSUPPORTED and shown raw', (_label, stored, line) => {
+    const display = formatRepoConfigForDisplay(
+      { repo: 'acme/foo', status: 'active', git_provider: stored as string },
+      PLATFORM,
+    );
+
+    expect(display.git_provider_supported).toBe(false);
+    expect(display.effective.git_provider).toBe(stored);
+    expect(display.field_sources.git_provider).toBe('blueprint');
+    expect(display.blueprint_overrides).toHaveProperty('git_provider', stored);
+    expect(buildRepoShowLines(display).find(l => l.key === 'git_provider')?.text).toBe(line);
+  });
+});
+
 describe('buildRepoShowLines', () => {
   test('shows platform defaults instead of dash for unset blueprint fields', () => {
     const display = formatRepoConfigForDisplay(

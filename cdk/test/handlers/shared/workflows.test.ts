@@ -31,6 +31,7 @@ import {
   resolveWorkflowRef,
   resolveWorkflowRefError,
   workflowIsReadOnly,
+  workflowProviderMismatch,
   workflowRequiresRepo,
   workflowUsesPr,
 } from '../../../src/handlers/shared/workflows';
@@ -214,6 +215,11 @@ describe('CDK descriptors stay in sync with agent/workflows/**', () => {
       const norm = (xs?: readonly string[]) => (xs ? [...xs].sort() : undefined);
       expect(norm(descriptor!.requiredInputs.allOf)).toEqual(norm(yamlAllOf));
       expect(norm(descriptor!.requiredInputs.oneOf)).toEqual(norm(yamlOneOf));
+
+      // ADR-025 §1: the descriptor's provider constraint mirrors the YAML's
+      // repo_config.provider exactly (undefined when the workflow declares none).
+      const repoConfig = (doc.repo_config ?? {}) as Record<string, unknown>;
+      expect(descriptor!.provider).toBe(repoConfig.provider as string | undefined);
     }
   });
 
@@ -286,6 +292,26 @@ describe('CDK descriptors stay in sync with agent/workflows/**', () => {
     };
     expect(requiresRepoOf(repoLessDefault)).toBe(false);
     expect(requiresRepoOf(codingDefault)).toBe(true);
+  });
+});
+
+describe('workflowProviderMismatch (ADR-025 §1/§9)', () => {
+  test('returns null when the declared provider matches the repo provider', () => {
+    expect(workflowProviderMismatch('coding/new-task-v1', 'github')).toBeNull();
+  });
+
+  test('names both providers when the workflow constraint differs', () => {
+    expect(workflowProviderMismatch('coding/pr-review-v1', 'gitlab'))
+      .toBe("workflow requires git_provider 'github', repo is 'gitlab'");
+  });
+
+  test('returns null for a workflow that declares no provider', () => {
+    expect(getWorkflowDescriptor('default/agent-v1')!.provider).toBeUndefined();
+    expect(workflowProviderMismatch('default/agent-v1', 'gitlab')).toBeNull();
+  });
+
+  test('returns null for an unknown id', () => {
+    expect(workflowProviderMismatch('nope/unknown-v1', 'gitlab')).toBeNull();
   });
 });
 

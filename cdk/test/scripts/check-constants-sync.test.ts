@@ -62,6 +62,8 @@ const FIXTURE_FILES = [
   'agent/src/jira_reactions.py',
   'agent/src/server.py',
   'agent/src/config.py',
+  // ADR-025 §1: the agent's git-provider module is a registered Python consumer.
+  'agent/src/git_provider/__init__.py',
   'cdk/src/constructs/lambda-microvm-compute.ts',
 ];
 

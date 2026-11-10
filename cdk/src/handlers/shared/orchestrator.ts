@@ -23,6 +23,7 @@ import { ulid } from 'ulid';
 import { resolveRepositoryBackend } from './compute-backend';
 import type { SessionHandle, SessionStatus } from './compute-strategy';
 import { AttachmentBudgetExceededError, AttachmentConfigurationError, AttachmentResolutionError, hydrateContext, resolveGitHubToken } from './context-hydration';
+import { resolveGitProvider } from './git-provider';
 import { logger, type Logger } from './logger';
 import { writeMinimalEpisode } from './memory';
 import { coerceNumericOrNull } from './numeric';
@@ -35,6 +36,7 @@ import { resolveUrlAttachments } from './resolve-url-attachments';
 import { APPROVAL_GATE_CAP_MAX, APPROVAL_GATE_CAP_MIN, type AgentAttachmentPayload, type AttachmentRecord, type TaskRecord } from './types';
 import { makeClient, makeDocClient } from './ua';
 import { computeTtlEpoch, DEFAULT_MAX_TURNS } from './validation';
+import { CODING_WORKFLOW_ID, workflowProviderMismatch } from './workflows';
 import { TaskStatus, TERMINAL_STATUSES, VALID_TRANSITIONS, type TaskStatusType } from '../../constructs/task-status';
 
 const ddb = makeDocClient();
@@ -566,6 +568,7 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
       has_model_override: !!repoConfig.model_id,
       has_prompt_override: !!repoConfig.system_prompt_overrides,
       has_token_override: !!repoConfig.github_token_secret_arn,
+      git_provider: repoConfig.git_provider,
     });
   } else {
     log.info('No per-repo config found, using platform defaults');
@@ -586,10 +589,20 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     }
   }
 
+  // ADR-025 §1/§9: the repo row is the only authority for the git provider. Absent
+  // (or repo-less) ⇒ github; any other non-implemented value throws, which the
+  // caller turns into 'Blueprint config load failed' before preflight/compute.
+  const gitProvider = resolveGitProvider(repoConfig?.git_provider);
+  // The workflow's repo_config.provider is a constraint, never a source. Same
+  // default workflow id as orchestrate-task's preflight step.
+  const providerMismatch = workflowProviderMismatch(task.resolved_workflow?.id ?? CODING_WORKFLOW_ID, gitProvider);
+  if (providerMismatch) throw new Error(providerMismatch);
+
   // All workflows inherit the deployment backend, including repo-less and read-only tasks.
   // A conflicting repository pin fails before concurrency admission.
   return {
     compute_type: resolveRepositoryBackend(repoConfig?.compute_type, process.env.DEPLOYED_COMPUTE_TYPE),
+    git_provider: gitProvider,
     runtime_arn: repoConfig?.runtime_arn ?? RUNTIME_ARN,
     model_id: repoConfig?.model_id,
     max_turns: repoConfig?.max_turns,
@@ -1006,6 +1019,11 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     // to ``mise run build`` / ``mise run lint``. Set for non-mise repos so
     // build-regression gating actually runs the repo's real command.
     ...(blueprintConfig?.build_command && { build_command: blueprintConfig.build_command }),
+    // ADR-025 §9: always emitted, top level (NOT in hydrated_context — the agent's
+    // HydratedContext is extra="forbid"). Re-resolved rather than read directly so a
+    // checkpointed blueprintConfig from before this field (durable replay) or a
+    // caller with no config still sends 'github', and a bogus value fails closed.
+    git_provider: resolveGitProvider(blueprintConfig?.git_provider),
     ...(blueprintConfig?.lint_command && { lint_command: blueprintConfig.lint_command }),
     // cedarText is inline blueprint policies ++ resolved registry
     // cedar_policy_module text (#246), so it supersedes the raw

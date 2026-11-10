@@ -50,6 +50,7 @@ global.fetch = mockFetch as unknown as typeof fetch;
 
 const baseBlueprintConfig: BlueprintConfig = {
   compute_type: 'agentcore',
+  git_provider: 'github',
   runtime_arn: 'arn:aws:bedrock:us-east-1:123456789012:agent-runtime/test',
   github_token_secret_arn: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:github-token',
 };

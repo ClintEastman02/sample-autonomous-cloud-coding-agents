@@ -43,6 +43,8 @@ export interface RepoConfigRow {
   readonly egress_allowlist?: string[];
   readonly cedar_policies?: string[];
   readonly approval_gate_cap?: number;
+  /** ADR-025 git provider id; absent means ``github``. Kept raw (not validated here). */
+  readonly git_provider?: string;
 }
 
 /**

@@ -5,6 +5,7 @@ import sys
 import uuid
 from datetime import UTC
 
+from git_provider import DEFAULT_GIT_PROVIDER, UnsupportedGitProviderError, resolve_git_provider
 from models import AttachmentConfig, TaskConfig
 from shared_constants import SHARED_CONSTANTS
 from shell import log
@@ -683,15 +684,37 @@ def build_config(
     initial_approval_gate_count: int = 0,
     approval_gate_cap: int | None = None,
     attachments: list[dict] | None = None,
+    git_provider: object | None = None,
 ) -> TaskConfig:
     """Build and validate configuration from explicit parameters.
 
     Parameters fall back to environment variables if empty.
+
+    ``git_provider`` is the payload value, passed through raw. ``None`` (absent
+    or JSON null) means ``github``; any other value that is not an implemented
+    provider id fails the task here, before any clone or other side effect
+    (ADR-025 §9).
     """
+    # ADR-025 §9: resolve the provider FIRST — before resolve_github_token(),
+    # which reads the platform GitHub secret and caches it in os.environ. That
+    # secret is never a fallback for another provider (§4), so an unsupported
+    # provider must not trigger the read HERE. This only keeps the secret unread
+    # on the ECS and local paths, where ``github_token`` arrives empty: on
+    # AgentCore and MicroVM ``/run``, ``server._extract_invocation_params`` has
+    # already called resolve_github_token() before this function runs.
+    # TODO(ADR-025 Phase 2 §4): resolve the SCM token after the provider is resolved.
+    # The error is reported through the shared ``errors`` list below.
+    provider_error: str | None = None
+    resolved_git_provider = DEFAULT_GIT_PROVIDER
+    try:
+        resolved_git_provider = resolve_git_provider(git_provider)
+    except UnsupportedGitProviderError as exc:
+        provider_error = str(exc)
+
     resolved_repo_url = repo_url or os.environ.get("REPO_URL", "")
     resolved_issue_number = issue_number or os.environ.get("ISSUE_NUMBER", "")
     resolved_task_description = task_description or os.environ.get("TASK_DESCRIPTION", "")
-    resolved_github_token = github_token or resolve_github_token()
+    resolved_github_token = github_token or ("" if provider_error else resolve_github_token())
     resolved_aws_region = aws_region or os.environ.get("AWS_REGION", "")
     resolved_anthropic_model = anthropic_model or os.environ.get(
         "ANTHROPIC_MODEL", "global.anthropic.claude-opus-5-5"
@@ -722,8 +745,15 @@ def build_config(
     # phase) — a repo-less default is the safe assumption only for non-coding.
     from workflow import WorkflowValidationError, load_workflow, policy_principal_for
 
+    # ADR-025 §1/§9: the workflow's repo_config.provider is a CONSTRAINT on the
+    # repo's provider, never a source for it. None when the workflow declares no
+    # provider (always so for repo-less workflows, per validator rule 7) or when
+    # the file failed to load.
+    workflow_provider: str | None = None
     try:
         workflow_obj = load_workflow(workflow_id)
+        if workflow_obj.repo_config is not None:
+            workflow_provider = workflow_obj.repo_config.provider
         policy_principal = policy_principal_for(workflow_obj)
         workflow_read_only = workflow_obj.read_only
         workflow_requires_repo = workflow_obj.resolved_requires_repo
@@ -748,12 +778,21 @@ def build_config(
         workflow_allowed_tools = []
 
     errors = []
+    if provider_error:
+        errors.append(provider_error)
+    elif workflow_provider is not None and workflow_provider != resolved_git_provider:
+        errors.append(
+            f"workflow requires git_provider {workflow_provider!r}, "
+            f"repo is {resolved_git_provider!r}"
+        )
     # Repo + GitHub token are required only for repo-bound workflows; a repo-less
     # workflow (requires_repo:false) runs from task_description/attachments alone.
     if workflow_requires_repo:
         if not resolved_repo_url:
             errors.append("repo_url is required (e.g., 'owner/repo')")
-        if not resolved_github_token:
+        # Skipped on an unsupported provider: the token was deliberately not
+        # resolved, and "github_token is required" would misname the failure.
+        if not resolved_github_token and not provider_error:
             errors.append("github_token is required")
     if not resolved_aws_region:
         errors.append("aws_region is required for Bedrock")
@@ -791,6 +830,7 @@ def build_config(
         system_prompt_overrides=system_prompt_overrides,
         build_command=build_command,
         lint_command=lint_command,
+        git_provider=resolved_git_provider,
         resolved_workflow=workflow,
         policy_principal=policy_principal,
         read_only=workflow_read_only,

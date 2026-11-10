@@ -21,6 +21,7 @@ import { PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { assertComputeSubstrateDeployed, defaultComputeType, type ComputeDeployment } from './compute-substrate';
 import { documentClient } from './dynamo-clients';
 import { CliError } from './errors';
+import { GIT_PROVIDERS_IMPLEMENTED, isImplementedGitProvider } from './git-provider';
 import {
   LambdaMicrovmProbeClientFactory,
   requireLambdaMicrovmAvailability,
@@ -76,6 +77,22 @@ export async function onboardRepo(
     existing = undefined;
   }
 
+  // ADR-025 §1/§9: the stored value is carried forward verbatim, so refuse to
+  // re-activate a row the orchestrator would fail at blueprint load. Checked
+  // before any probe or write; there is no CLI flag to change it in this phase.
+  if (existing?.git_provider !== undefined && !isImplementedGitProvider(existing.git_provider)) {
+    throw new CliError(
+      `Repository '${repo}' has unsupported git_provider '${String(existing.git_provider)}' `
+      + `(implemented: ${GIT_PROVIDERS_IMPLEMENTED.join(', ')}). `
+      // The Blueprint construct has no git_provider prop and only SETs the fields
+      // it lists, so a redeploy cannot clear this — the row must be fixed directly.
+      + 'Correct or remove the git_provider attribute on the RepoTable row directly '
+      + 'before re-onboarding, e.g. '
+      + `aws dynamodb update-item --table-name ${tableName} `
+      + `--key '{"repo":{"S":"${repo}"}}' --update-expression 'REMOVE git_provider'`,
+    );
+  }
+
   const effectiveComputeType = options.computeType ?? existing?.compute_type
     ?? (options.deployment ? defaultComputeType(options.deployment) : 'agentcore');
   if (options.deployment) {
@@ -124,6 +141,8 @@ export async function onboardRepo(
     item.approval_gate_cap = existing.approval_gate_cap;
   }
   if (existing?.max_budget_usd !== undefined) item.max_budget_usd = existing.max_budget_usd;
+  // Carry forward only; a fresh onboard writes no attribute (absent means github).
+  if (existing?.git_provider !== undefined) item.git_provider = existing.git_provider;
 
   await ddb.send(new PutCommand({
     TableName: tableName,

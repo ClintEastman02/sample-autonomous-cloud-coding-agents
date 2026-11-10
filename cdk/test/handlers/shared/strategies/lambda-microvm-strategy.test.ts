@@ -472,6 +472,38 @@ describe('LambdaMicrovmComputeStrategy', () => {
       expect(Buffer.byteLength(runHookPayload, 'utf8')).toBeLessThan(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
     });
 
+    // ADR-025 §9: git_provider must survive the orchestrator → MicroVM hop, on
+    // both the inline envelope and the S3-pointer body.
+    test('forwards top-level git_provider in the inline envelope agent_payload', async () => {
+      runMicrovmOk();
+
+      await new LambdaMicrovmComputeStrategy().startSession({
+        taskId: 'TASK001',
+        userId: 'cognito-test',
+        payload: { repo_url: 'org/repo', prompt: 'Fix the bug', git_provider: 'github' },
+        blueprintConfig: BLUEPRINT,
+      });
+
+      expect(mockS3Send).not.toHaveBeenCalled();
+      const envelope = JSON.parse(mockSend.mock.calls[0][0].input.runHookPayload);
+      expect(envelope.agent_payload.git_provider).toBe('github');
+    });
+
+    test('forwards top-level git_provider in the S3 payload body', async () => {
+      mockS3Send.mockResolvedValueOnce({});
+      runMicrovmOk();
+
+      await new LambdaMicrovmComputeStrategy().startSession({
+        taskId: 'TASK001',
+        userId: 'cognito-test',
+        payload: { repo_url: 'org/repo', git_provider: 'github', hydrated_context: { blob: 'x'.repeat(20_000) } },
+        blueprintConfig: BLUEPRINT,
+      });
+
+      const put = mockS3Send.mock.calls[0][0];
+      expect(JSON.parse(put.input.Body).git_provider).toBe('github');
+    });
+
     test('the inline/S3 branch point IS the 4096-byte service cap, with no headroom', () => {
       // Live-measured, NOT read off the SDK docs (which say 16,384): the service
       // rejects 4097 with "Member must have length less than or equal to 4096".
