@@ -49,7 +49,8 @@ const POLICY_PY = path.join(REPO_ROOT, 'agent/src/policy.py');
 const JIRA_REACTIONS_PY = path.join(REPO_ROOT, 'agent/src/jira_reactions.py');
 const SERVER_PY = path.join(REPO_ROOT, 'agent/src/server.py');
 const CONFIG_PY = path.join(REPO_ROOT, 'agent/src/config.py');
-const PYTHON_CONSUMERS = [POLICY_PY, JIRA_REACTIONS_PY, SERVER_PY, CONFIG_PY];
+const GIT_PROVIDER_PY = path.join(REPO_ROOT, 'agent/src/git_provider/__init__.py');
+const PYTHON_CONSUMERS = [POLICY_PY, JIRA_REACTIONS_PY, SERVER_PY, CONFIG_PY, GIT_PROVIDER_PY];
 const MICROVM_COMPUTE_TS = path.join(REPO_ROOT, 'cdk/src/constructs/lambda-microvm-compute.ts');
 const TS_CONSUMERS = [MICROVM_COMPUTE_TS];
 
@@ -118,6 +119,20 @@ const OWNED_PYTHON_PATTERNS: ReadonlyArray<{ name: string; regex: RegExp }> = [
     name: '_READY_WARMUP_REQUIRED_TIMEOUT_SECONDS',
     regex: /^\s*_READY_WARMUP_REQUIRED_TIMEOUT_SECONDS\s*(?::\s*(?:int|float))?\s*=\s*-?\d+\b/m,
   },
+  // ADR-025 §1: the implemented git-provider list is what the agent fails
+  // closed against, so a literal copy would let the agent and the orchestrator
+  // disagree about which providers are accepted. A contract-sourced
+  // `= frozenset(_GIT_PROVIDERS_CONTRACT["implemented"])` does not match.
+  {
+    name: 'IMPLEMENTED_GIT_PROVIDERS',
+    regex: /^\s*IMPLEMENTED_GIT_PROVIDERS\s*(?::[^=]+)?=\s*(?:frozenset\(|set\(|tuple\(|list\()?\s*[[{(]/m,
+  },
+  {
+    name: 'GIT_PROVIDER_VOCABULARY',
+    regex: /^\s*GIT_PROVIDER_VOCABULARY\s*(?::[^=]+)?=\s*(?:frozenset\(|set\(|tuple\(|list\()?\s*[[{(]/m,
+  },
+  // Any annotation (`: str`, `: VcsProvider`), since the agent types it as the Literal.
+  { name: 'DEFAULT_GIT_PROVIDER', regex: /^\s*DEFAULT_GIT_PROVIDER\s*(?::[^=]+)?=\s*["']/m },
 ];
 
 /**

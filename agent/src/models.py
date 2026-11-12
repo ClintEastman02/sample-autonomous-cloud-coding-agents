@@ -6,7 +6,12 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from git_provider import DEFAULT_GIT_PROVIDER
 from sanitization import sanitize_external_content
+
+# Runtime import, not TYPE_CHECKING: pydantic resolves TaskConfig's (postponed)
+# field annotations from this module's globals when the model is built.
+from workflow.models import VcsProvider  # noqa: TC001
 
 
 class IssueComment(BaseModel):
@@ -176,6 +181,11 @@ class TaskConfig(BaseModel):
     # gating actually runs the repo's real command.
     build_command: str = ""
     lint_command: str = ""
+    # Hosting provider of the target repo (ADR-025 §1). Resolved by
+    # ``git_provider.resolve_git_provider`` in ``build_config`` from the payload's
+    # ``git_provider`` key; the vocabulary is the ADR-014 ``VcsProvider`` Literal,
+    # but only implemented providers ever reach a TaskConfig.
+    git_provider: VcsProvider = DEFAULT_GIT_PROVIDER
     # The pinned workflow this task runs ({"id", "version"}), resolved at the
     # create-task boundary and threaded through the payload. None on local/batch
     # runs, where the pipeline defaults to coding/new-task-v1.

@@ -834,6 +834,7 @@ def run_task(
     user_id: str = "",
     attachments: list[dict] | None = None,
     resolved_assets: list[dict] | None = None,
+    git_provider: object | None = None,
 ) -> dict:
     """Run the full agent pipeline and return a serialized result dict.
 
@@ -882,6 +883,7 @@ def run_task(
         initial_approval_gate_count=initial_approval_gate_count,
         approval_gate_cap=approval_gate_cap,
         attachments=attachments,
+        git_provider=git_provider,
     )
 
     # Inject Cedar policies into config for the PolicyEngine in runner.py
