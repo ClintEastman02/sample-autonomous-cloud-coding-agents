@@ -34,6 +34,10 @@ import {
   BUDGET_WARNING_PERCENT,
 } from '../src/budget-store';
 import {
+  DEFAULT_GIT_PROVIDER,
+  GIT_PROVIDERS_IMPLEMENTED,
+} from '../src/git-provider';
+import {
   FORGE_WEBTRIGGER_SUFFIX,
   JIRA_APP_ACTOR_MIN_SECRET_LENGTH,
 } from '../src/jira-app-actor';
@@ -83,7 +87,17 @@ describe('CLI constants parity with contracts/constants.json', () => {
       exceeded_alert_marker: string;
     };
     jira_app_actor: { min_secret_length: number; forge_webtrigger_suffix: string };
+    git_providers: { vocabulary: string[]; implemented: string[]; default: string };
   };
+
+  test('git_providers mirror matches the contract (ADR-025 §1)', () => {
+    expect([...GIT_PROVIDERS_IMPLEMENTED]).toEqual(contracts.git_providers.implemented);
+    expect(DEFAULT_GIT_PROVIDER).toBe(contracts.git_providers.default);
+  });
+
+  test('git_providers default is an implemented provider', () => {
+    expect(GIT_PROVIDERS_IMPLEMENTED).toContain(DEFAULT_GIT_PROVIDER);
+  });
 
   test('approval_timeout_s bounds match the contract', () => {
     expect(APPROVAL_TIMEOUT_S_MIN).toBe(contracts.approval_timeout_s.min);

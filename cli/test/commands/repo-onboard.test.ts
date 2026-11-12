@@ -210,6 +210,65 @@ describe('repo onboard/offboard', () => {
     expect(put.input.Item?.cedar_policies).toEqual(['policy']);
   });
 
+  test('onboardRepo carries a stored git_provider forward unchanged', async () => {
+    const { loadRepoConfig } = jest.requireMock('../../src/repo-lookup') as { loadRepoConfig: jest.Mock };
+    loadRepoConfig.mockResolvedValueOnce({ repo: 'acme/a', status: 'removed', git_provider: 'github' });
+
+    const config = await onboardRepo('us-east-1', 'RepoTable', 'acme/a');
+
+    const put = ddbSend.mock.calls[0][0] as PutCommand;
+    expect(put.input.Item?.git_provider).toBe('github');
+    expect(config.git_provider).toBe('github');
+  });
+
+  test('onboardRepo writes no git_provider attribute on a fresh onboard', async () => {
+    const { loadRepoConfig } = jest.requireMock('../../src/repo-lookup') as { loadRepoConfig: jest.Mock };
+    loadRepoConfig.mockRejectedValueOnce(new RepoNotOnboardedError('acme/a'));
+
+    await onboardRepo('us-east-1', 'RepoTable', 'acme/a', { computeType: 'agentcore' });
+
+    const put = ddbSend.mock.calls[0][0] as PutCommand;
+    expect(put.input.Item).not.toHaveProperty('git_provider');
+  });
+
+  test('onboardRepo does not add git_provider when re-onboarding a row without one', async () => {
+    await onboardRepo('us-east-1', 'RepoTable', 'acme/a');
+
+    const put = ddbSend.mock.calls[0][0] as PutCommand;
+    expect(put.input.Item).not.toHaveProperty('git_provider');
+  });
+
+  test.each<string | null>(['gitlab', 'GitHub', ' github', 'svn', '', null])(
+    'rejects stored unsupported git_provider %p before a probe or write',
+    async stored => {
+      const { loadRepoConfig } = jest.requireMock('../../src/repo-lookup') as { loadRepoConfig: jest.Mock };
+      loadRepoConfig.mockResolvedValueOnce({
+        repo: 'acme/a', status: 'active', compute_type: 'lambda-microvm', git_provider: stored,
+      });
+      const send = jest.fn();
+
+      const attempt = onboardRepo('us-east-1', 'RepoTable', 'acme/a', {}, {
+        lambdaMicrovmClientFactory: () => ({ send }),
+      });
+      await expect(attempt).rejects.toBeInstanceOf(CliError);
+      await expect(attempt).rejects.toThrow(`unsupported git_provider '${stored}'`);
+      expect(send).not.toHaveBeenCalled();
+      expect(ddbSend).not.toHaveBeenCalled();
+    },
+  );
+
+  test('unsupported git_provider guidance points at the RepoTable row, not the Blueprint', async () => {
+    const { loadRepoConfig } = jest.requireMock('../../src/repo-lookup') as { loadRepoConfig: jest.Mock };
+    loadRepoConfig.mockResolvedValueOnce({ repo: 'acme/a', status: 'removed', git_provider: 'gitlab' });
+
+    const attempt = onboardRepo('us-east-1', 'MyRepoTable', 'acme/a');
+    await expect(attempt).rejects.toThrow(
+      'aws dynamodb update-item --table-name MyRepoTable '
+      + '--key \'{"repo":{"S":"acme/a"}}\' --update-expression \'REMOVE git_provider\'',
+    );
+    await expect(attempt).rejects.not.toThrow(/via its Blueprint/);
+  });
+
   test('onboardRepo persists --poll-interval override', async () => {
     await onboardRepo('us-east-1', 'RepoTable', 'acme/a', { pollIntervalMs: 12345 });
 
