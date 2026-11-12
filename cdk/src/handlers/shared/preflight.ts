@@ -18,11 +18,13 @@
  */
 
 // Admission / pre-invoke checks before orchestration. See docs/design/ORCHESTRATOR.md (admission control).
-// Tests: cdk/test/handlers/shared/preflight.test.ts
+// Tests: cdk/test/handlers/shared/preflight.test.ts, cdk/test/handlers/shared/preflight-parity.test.ts
 
 import { resolveGitHubToken, MissingSecretError, SecretUnreadableError } from './context-hydration';
+import { resolveGitProvider } from './git-provider';
 import { logger } from './logger';
 import type { BlueprintConfig } from './repo-config';
+import type { ScmProvider } from './scm-provider';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -290,6 +292,36 @@ async function checkPrAccessible(repo: string, prNumber: number, token: string):
   }
 }
 
+// ---------------------------------------------------------------------------
+// SCM provider dispatch (ADR-025 §2)
+// ---------------------------------------------------------------------------
+
+/** GitHub delegates to the check functions above; their tests keep pinning its behaviour. */
+const GITHUB_SCM_PROVIDER: ScmProvider = {
+  checkReachability: checkGitHubReachability,
+  checkRepoAccess,
+  checkPrAccessible,
+};
+
+/**
+ * Map a blueprint `git_provider` value to its preflight implementation.
+ *
+ * `resolveGitProvider` throws for anything that is not an implemented id (absent means
+ * github); that throw propagates on purpose — there is no fallback to GitHub. The
+ * switch is exhaustive, so adding a `GitProviderId` without a case fails to compile.
+ */
+function getScmProvider(raw: unknown): ScmProvider {
+  const id = resolveGitProvider(raw);
+  switch (id) {
+    case 'github':
+      return GITHUB_SCM_PROVIDER;
+    default: {
+      const unhandled: never = id;
+      throw new Error(`no ScmProvider for git_provider '${String(unhandled)}'`);
+    }
+  }
+}
+
 async function checkRuntimeAvailability(): Promise<PreflightCheckResult> {
   const start = Date.now();
   return { check: 'runtime_availability', passed: true, durationMs: Date.now() - start };
@@ -350,6 +382,13 @@ export async function runPreflightChecks(
     };
   }
 
+  // Resolve the provider before reading any secret. An unsupported git_provider
+  // throws here, with no secret read and no provider API call, on both the
+  // token and no-token paths; the orchestrator's pre-flight step fails the task
+  // on a throw. loadBlueprintConfig rejects such rows first; this is defence in
+  // depth (ADR-025 §9).
+  const provider = getScmProvider(blueprintConfig.git_provider);
+
   if (blueprintConfig.github_token_secret_arn) {
     // Resolve token — fail immediately if token resolution fails
     let token: string;
@@ -387,9 +426,9 @@ export async function runPreflightChecks(
     // Run reachability + repo access checks in parallel
 
     const results = await Promise.allSettled([
-      checkGitHubReachability(token),
-      checkRepoAccess(repo, token, readOnly),
-      ...(prNumber !== undefined ? [checkPrAccessible(repo, prNumber, token)] : []),
+      provider.checkReachability(token),
+      provider.checkRepoAccess(repo, token, readOnly),
+      ...(prNumber !== undefined ? [provider.checkPrAccessible(repo, prNumber, token)] : []),
     ]);
 
     for (const result of results) {
