@@ -124,6 +124,22 @@ describe('EcsComputeStrategy', () => {
       expect(override.command[0]).toBe('python');
     });
 
+    // ADR-025 §9: git_provider must survive the orchestrator → ECS hop (inline path).
+    test('forwards top-level git_provider in the inline AGENT_PAYLOAD', async () => {
+      mockSend.mockResolvedValueOnce({ tasks: [{ taskArn: TASK_ARN }] });
+
+      await new EcsComputeStrategy().startSession({
+        taskId: 'TASK001',
+        userId: 'cognito-test',
+        payload: { repo_url: 'org/repo', prompt: 'Fix the bug', git_provider: 'github' },
+        blueprintConfig: { compute_type: 'ecs', git_provider: 'github', runtime_arn: '' },
+      });
+
+      const envVars = mockSend.mock.calls[0][0].input.overrides.containerOverrides[0].environment;
+      const agentPayload = envVars.find((e: { name: string }) => e.name === 'AGENT_PAYLOAD');
+      expect(JSON.parse(agentPayload.value).git_provider).toBe('github');
+    });
+
     test('readOnly falls back to the build def when no planning def is wired (older deploy — never worse)', async () => {
       // The top-of-file import has NO ECS_PLANNING_TASK_DEFINITION_ARN, so even a
       // read-only workflow must run on the build def (pre-rightsize behavior).
@@ -435,6 +451,23 @@ describe('EcsComputeStrategy with ECS_PAYLOAD_BUCKET (S3-pointer path, #502)', (
     const uri = envVars.find((e: { name: string }) => e.name === 'AGENT_PAYLOAD_S3_URI');
     expect(uri.value).toBe(`s3://${PAYLOAD_BUCKET}/TASK001/payload.json`);
     expect(envVars.find((e: { name: string }) => e.name === 'AGENT_PAYLOAD')).toBeUndefined();
+  });
+
+  // ADR-025 §9: git_provider must survive the orchestrator → ECS hop (S3 path).
+  test('forwards top-level git_provider in the S3 payload body', async () => {
+    mockS3Send.mockResolvedValueOnce({});
+    mockSend.mockResolvedValueOnce({ tasks: [{ taskArn: TASK_ARN }] });
+
+    const { EcsComputeStrategy: Strategy } = loadStrategyWithBucket();
+    await new Strategy().startSession({
+      taskId: 'TASK001',
+      userId: 'cognito-test',
+      payload: { repo_url: 'org/repo', prompt: 'Fix the bug', git_provider: 'github' },
+      blueprintConfig: { compute_type: 'ecs', git_provider: 'github', runtime_arn: '' },
+    });
+
+    const put = mockS3Send.mock.calls[0][0];
+    expect(JSON.parse(put.input.Body).git_provider).toBe('github');
   });
 
   test('boot command loads payload from S3 when the URI is set, else inline', async () => {

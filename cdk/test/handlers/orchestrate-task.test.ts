@@ -76,6 +76,7 @@ process.env.TASK_RETENTION_DAYS = '90';
 process.env.MEMORY_ID = 'mem-test-default';
 
 import { classifyError } from '../../src/handlers/shared/error-classifier';
+import * as gitProviderModule from '../../src/handlers/shared/git-provider';
 import {
   admissionControl,
   emitTaskEvent,
@@ -958,6 +959,66 @@ describe('loadBlueprintConfig', () => {
     const config = await loadBlueprintConfig(buildTask as any);
     expect(config.compute_type).toBe('ecs');
   });
+
+  // ADR-025 §1/§9: the repo row is the only authority for git_provider.
+  describe('git_provider', () => {
+    const row = {
+      repo: 'org/repo',
+      status: 'active' as const,
+      onboarded_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+    };
+
+    test('an absent attribute resolves to github', async () => {
+      mockLoadRepoConfig.mockResolvedValueOnce(row);
+      const config = await loadBlueprintConfig(baseTask as any);
+      expect(config.git_provider).toBe('github');
+    });
+
+    test('github is kept', async () => {
+      mockLoadRepoConfig.mockResolvedValueOnce({ ...row, git_provider: 'github' });
+      const config = await loadBlueprintConfig(baseTask as any);
+      expect(config.git_provider).toBe('github');
+    });
+
+    test.each(['gitlab', 'GitHub', '', null])('a stored %p rejects with a named reason', async (value) => {
+      mockLoadRepoConfig.mockResolvedValueOnce({ ...row, git_provider: value });
+      await expect(loadBlueprintConfig(baseTask as any)).rejects.toThrow(/unsupported git_provider/);
+    });
+
+    test('a repo-less task resolves to github', async () => {
+      const repoLess = { ...baseTask, repo: undefined, resolved_workflow: { id: 'default/agent-v1', version: '1.0.0' } };
+      const config = await loadBlueprintConfig(repoLess as any);
+      expect(mockLoadRepoConfig).not.toHaveBeenCalled();
+      expect(config.git_provider).toBe('github');
+    });
+
+    test("rejects when the workflow's repo_config.provider differs from the repo provider", async () => {
+      // Only github is implemented today, so a mismatch is unreachable through a
+      // real row; force the resolved provider to exercise the constraint wiring.
+      const spy = jest.spyOn(gitProviderModule, 'resolveGitProvider').mockReturnValueOnce('gitlab' as any);
+      try {
+        mockLoadRepoConfig.mockResolvedValueOnce(row);
+        const task = { ...baseTask, resolved_workflow: { id: 'coding/pr-review-v1', version: '1.0.0' } };
+        await expect(loadBlueprintConfig(task as any))
+          .rejects.toThrow("workflow requires git_provider 'github', repo is 'gitlab'");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    test('a workflow that declares no provider accepts any resolved provider', async () => {
+      const spy = jest.spyOn(gitProviderModule, 'resolveGitProvider').mockReturnValueOnce('gitlab' as any);
+      try {
+        mockLoadRepoConfig.mockResolvedValueOnce(row);
+        const task = { ...baseTask, resolved_workflow: { id: 'default/agent-v1', version: '1.0.0' } };
+        const config = await loadBlueprintConfig(task as any);
+        expect(config.git_provider).toBe('gitlab');
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
 });
 
 describe('hydrateAndTransition with blueprint config', () => {
@@ -1070,6 +1131,46 @@ describe('hydrateAndTransition with blueprint config', () => {
       cedar_policies: [],
     });
     expect(payload.cedar_policies).toBeUndefined();
+  });
+
+  // ADR-025 §9: the orchestrator includes git_provider in every task payload.
+  test('emits top-level git_provider from the blueprint config', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const payload = await hydrateAndTransition(baseTask as any, {
+      compute_type: 'agentcore',
+      git_provider: 'github',
+      runtime_arn: 'arn:test',
+    });
+    expect(payload.git_provider).toBe('github');
+    expect(payload.hydrated_context).toBeDefined();
+    expect(payload.hydrated_context as Record<string, unknown>).not.toHaveProperty('git_provider');
+  });
+
+  test('emits git_provider=github with no blueprint config at all', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const payload = await hydrateAndTransition(baseTask as any);
+    expect(payload.git_provider).toBe('github');
+    expect(payload.hydrated_context as Record<string, unknown>).not.toHaveProperty('git_provider');
+  });
+
+  test('emits git_provider=github for a checkpointed config from before the field existed', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    const legacy = { compute_type: 'agentcore', runtime_arn: 'arn:test' };
+    const payload = await hydrateAndTransition(baseTask as any, legacy as any);
+    expect(payload.git_provider).toBe('github');
+  });
+
+  test('a bogus git_provider in the blueprint config fails closed', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContext);
+    await expect(hydrateAndTransition(baseTask as any, {
+      compute_type: 'agentcore',
+      git_provider: 'bogus' as any,
+      runtime_arn: 'arn:test',
+    })).rejects.toThrow("unsupported git_provider 'bogus'");
   });
 });
 

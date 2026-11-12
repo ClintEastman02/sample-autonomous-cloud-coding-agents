@@ -73,6 +73,8 @@ describe('runtime handlers do not bundle aws-cdk-lib', () => {
   it.each([
     'src/handlers/shared/workflows.ts',
     'src/handlers/shared/bedrock-model-constants.ts',
+    // ADR-025: dependency-free so constructs and handlers can both import it.
+    'src/handlers/shared/git-provider.ts',
   ])('%s bundles without pulling in the CDK', (entry) => {
     const { bytes, cdkRefs } = bundle(entry);
     // Reference count first: it names the actual defect, so the failure message is

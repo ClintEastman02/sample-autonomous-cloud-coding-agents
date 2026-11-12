@@ -62,6 +62,23 @@ describe('AgentCoreComputeStrategy', () => {
       expect(invokeInput.runtimeUserId).toBe('cognito-user-1');
     });
 
+    // ADR-025 §9: git_provider must survive the orchestrator → AgentCore hop.
+    test('forwards top-level git_provider to the /invocations input', async () => {
+      mockSend.mockResolvedValueOnce({});
+      const strategy = new AgentCoreComputeStrategy();
+
+      await strategy.startSession({
+        taskId: 'TASK001',
+        userId: 'cognito-user-1',
+        payload: { repo_url: 'org/repo', task_id: 'TASK001', git_provider: 'github' },
+        blueprintConfig: { compute_type: 'agentcore', git_provider: 'github', runtime_arn: defaultRuntimeArn },
+      });
+
+      const bytes = mockSend.mock.calls[0][0].input.payload as Uint8Array;
+      const wire = JSON.parse(new TextDecoder().decode(bytes));
+      expect(wire.input.git_provider).toBe('github');
+    });
+
     test('uses runtime_arn from blueprintConfig (single source of truth)', async () => {
       mockSend.mockResolvedValueOnce({});
       const strategy = new AgentCoreComputeStrategy();

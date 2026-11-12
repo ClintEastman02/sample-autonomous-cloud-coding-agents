@@ -94,6 +94,22 @@ describe('loadRepoConfig', () => {
     expect(result).toEqual(config);
   });
 
+  // ADR-025: the raw row is passed through unvalidated; the orchestrator resolves
+  // (and rejects) it, so even an unsupported stored value must reach it intact.
+  test.each(['github', 'gitlab'])('passes a stored git_provider %p through raw', async (value) => {
+    const config = {
+      repo: 'org/repo',
+      status: 'active',
+      onboarded_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+      git_provider: value,
+    };
+    mockSend.mockResolvedValueOnce({ Item: config });
+
+    const result = await loadRepoConfig('org/repo');
+    expect(result?.git_provider).toBe(value);
+  });
+
   test('returns null for missing repos', async () => {
     mockSend.mockResolvedValueOnce({ Item: undefined });
     const result = await loadRepoConfig('org/missing');

@@ -185,6 +185,11 @@ function main(): number {
       warmup_total_budget_seconds: number;
       warmup_required_timeout_seconds: number;
     };
+    git_providers?: {
+      vocabulary: string[];
+      implemented: string[];
+      default: string;
+    };
   };
   try {
     json = JSON.parse(fs.readFileSync(CONSTANTS_JSON, 'utf-8'));
@@ -354,6 +359,37 @@ function main(): number {
       'warmup_total_budget_seconds (the required warm-up must leave the ' +
       'best-effort ones something to share)',
     );
+  }
+
+  // ADR-025 §1: `implemented` is the fail-closed allowlist on both the
+  // orchestrator and the agent, so it must sit inside the ADR-014 vocabulary and
+  // the default must be implemented (an absent row/payload value resolves to it).
+  const gp = json.git_providers;
+  if (
+    !gp
+    || !Array.isArray(gp.vocabulary)
+    || !Array.isArray(gp.implemented)
+    || typeof gp.default !== 'string'
+  ) {
+    console.error(`${CONSTANTS_JSON} is missing git_providers.{vocabulary,implemented,default}`);
+    return 1;
+  }
+  if (gp.implemented.length === 0) {
+    invariantErrors.push('git_providers.implemented must not be empty');
+  }
+  for (const id of gp.implemented) {
+    if (!gp.vocabulary.includes(id)) {
+      invariantErrors.push(`git_providers.implemented names "${id}", absent from vocabulary`);
+    }
+  }
+  if (new Set(gp.implemented).size !== gp.implemented.length) {
+    invariantErrors.push('git_providers.implemented contains a duplicate');
+  }
+  if (new Set(gp.vocabulary).size !== gp.vocabulary.length) {
+    invariantErrors.push('git_providers.vocabulary contains a duplicate');
+  }
+  if (!gp.implemented.includes(gp.default)) {
+    invariantErrors.push(`git_providers.default "${gp.default}" must be one of implemented`);
   }
 
   if (invariantErrors.length > 0) {

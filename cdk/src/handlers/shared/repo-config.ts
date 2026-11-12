@@ -19,6 +19,7 @@
 
 import { GetCommand } from '@aws-sdk/lib-dynamodb';
 import type { ComputeBackend } from './compute-backend';
+import type { GitProviderId } from './git-provider';
 import { logger } from './logger';
 import { makeDocClient } from './ua';
 
@@ -34,6 +35,13 @@ export interface RepoConfig {
   readonly onboarded_at: string;
   readonly updated_at: string;
   readonly compute_type?: ComputeType;
+  /**
+   * ADR-025 §1: the repo row is the only authority for the git provider. Absent
+   * means ``github``. This is a cast DDB row, so at runtime it may hold any value;
+   * the orchestrator resolves it with ``resolveGitProvider`` (fail-closed).
+   * Typed as the raw ``string`` on purpose: consumers must resolve, never trust it.
+   */
+  readonly git_provider?: string;
   readonly runtime_arn?: string;
   readonly model_id?: string;
   readonly max_turns?: number;
@@ -81,6 +89,11 @@ export interface RepoConfig {
  */
 export interface BlueprintConfig {
   readonly compute_type: ComputeType;
+  /**
+   * ADR-025: resolved git provider. Always set by ``loadBlueprintConfig``; absent on a
+   * pre-ADR-025 durable checkpoint, so consumers must call ``resolveGitProvider()``.
+   */
+  readonly git_provider?: GitProviderId;
   readonly runtime_arn?: string;
   readonly model_id?: string;
   readonly max_turns?: number;
