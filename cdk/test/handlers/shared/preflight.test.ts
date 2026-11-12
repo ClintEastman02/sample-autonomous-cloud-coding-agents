@@ -462,3 +462,102 @@ describe('runPreflightChecks', () => {
     expect(result.failureReason).toBe(PreflightFailureReason.INSUFFICIENT_GITHUB_REPO_PERMISSIONS);
   });
 });
+
+// ---------------------------------------------------------------------------
+// ScmProvider dispatch (ADR-025 Phase 1b)
+// ---------------------------------------------------------------------------
+
+describe('runPreflightChecks: git_provider dispatch (ADR-025 §2)', () => {
+  afterEach(() => {
+    mockFetch.mockReset();
+    mockSmSend.mockReset();
+  });
+
+  /** Answer every GitHub endpoint preflight can hit, keyed by URL, so call order cannot skew results. */
+  function routeGitHubFetch(): void {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === 'https://api.github.com/rate_limit') return { ok: true, status: 200 };
+      if (url === 'https://api.github.com/graphql') {
+        return { ok: true, status: 200, json: async () => ({ data: { repository: { viewerPermission: 'TRIAGE' } } }) };
+      }
+      if (url.endsWith('/pulls/42')) return { ok: true, status: 200, json: async () => ({ state: 'open' }) };
+      return githubRepoOk({ push: false });
+    });
+  }
+
+  function withoutDurations(checks: readonly { durationMs: number }[]): unknown[] {
+    return checks.map(({ durationMs: _durationMs, ...rest }) => rest);
+  }
+
+  function configWith(gitProvider: unknown, omit = false): BlueprintConfig {
+    const { git_provider: _gp, ...rest } = baseBlueprintConfig;
+    return (omit ? rest : { ...rest, git_provider: gitProvider }) as unknown as BlueprintConfig;
+  }
+
+  test.each([
+    ['write workflow, no PR', false, undefined],
+    ['read-only workflow with PR', true, 42],
+  ])('absent and \'github\' git_provider are indistinguishable (%s)', async (_label, readOnly, prNumber) => {
+    mockSmSend.mockResolvedValue({ SecretString: 'ghp_test123' });
+    routeGitHubFetch();
+
+    const absent = await runPreflightChecks('owner/repo', configWith(undefined, true), prNumber, readOnly);
+    const absentUrls = mockFetch.mock.calls.map(c => c[0]);
+    const absentSmCalls = mockSmSend.mock.calls.length;
+    mockFetch.mockClear();
+    mockSmSend.mockClear();
+    clearTokenCache();
+
+    const github = await runPreflightChecks('owner/repo', configWith('github'), prNumber, readOnly);
+    const githubUrls = mockFetch.mock.calls.map(c => c[0]);
+
+    expect(githubUrls).toEqual(absentUrls);
+    expect(mockSmSend.mock.calls.length).toBe(absentSmCalls);
+    expect(absentSmCalls).toBeGreaterThan(0);
+    expect(absentUrls.length).toBeGreaterThan(0);
+    expect(github.passed).toBe(absent.passed);
+    expect(github.failureReason).toBe(absent.failureReason);
+    expect(github.failureDetail).toBe(absent.failureDetail);
+    expect(withoutDurations(github.checks)).toEqual(withoutDurations(absent.checks));
+  });
+
+  test.each(['gitlab', 'GitHub', null, ''])(
+    'unsupported git_provider %p with a token throws before reading the secret or calling any API',
+    async (value) => {
+      mockSmSend.mockResolvedValue({ SecretString: 'ghp_test123' });
+
+      await expect(runPreflightChecks('owner/repo', configWith(value), 42)).rejects.toThrow(/unsupported git_provider/);
+
+      expect(mockSmSend).toHaveBeenCalledTimes(0);
+      expect(mockFetch).toHaveBeenCalledTimes(0);
+    },
+  );
+
+  test('unsupported git_provider without a token secret throws instead of passing with a warning', async () => {
+    const { github_token_secret_arn: _arn, ...noToken } = configWith('gitlab') as unknown as Record<string, unknown>;
+
+    await expect(runPreflightChecks('owner/repo', noToken as unknown as BlueprintConfig)).rejects.toThrow(
+      /unsupported git_provider/,
+    );
+
+    expect(mockSmSend).toHaveBeenCalledTimes(0);
+    expect(mockFetch).toHaveBeenCalledTimes(0);
+  });
+
+  test('a repo-less workflow short-circuits before provider resolution', async () => {
+    const result = await runPreflightChecks(undefined, configWith('gitlab'), undefined, false, false);
+
+    expect(result.passed).toBe(true);
+    expect(mockSmSend).toHaveBeenCalledTimes(0);
+    expect(mockFetch).toHaveBeenCalledTimes(0);
+  });
+
+  test('the missing-repo invariant guard runs before provider resolution', async () => {
+    const result = await runPreflightChecks(undefined, configWith('gitlab'));
+
+    expect(result.passed).toBe(false);
+    expect(result.failureDetail).toMatch(/internal invariant violation/);
+    expect(mockSmSend).toHaveBeenCalledTimes(0);
+    expect(mockFetch).toHaveBeenCalledTimes(0);
+  });
+});
